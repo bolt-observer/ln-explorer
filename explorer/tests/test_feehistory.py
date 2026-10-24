@@ -73,13 +73,31 @@ class StoreFeeHistoryTests(unittest.TestCase):
         self.assertEqual([(c["dir"], c["ppm"], c["disabled"]) for c in changes], [(0, 10, False), (1, 20, False), (1, 30, True)])
         self.store.record_local_snapshot()
         payload = self.store.fee_history_payload("all")
-        live = payload["series"][0]
-        self.assertEqual(live["source"], "live")
+        live = next(series for series in payload["series"] if series["source"] == "live")
         self.assertEqual(live["points"][-1][1], 1)  # one enabled half-channel
         self.assertEqual(live["points"][-1][3], 10)
-        hist = self.store._conn.execute("SELECT hist FROM fee_daily").fetchone()[0]
+        hist = self.store._conn.execute("SELECT hist FROM fee_daily WHERE source = 'live'").fetchone()[0]
         self.assertEqual(sum(json.loads(hist)), 1)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DatasetTests(unittest.TestCase):
+    def test_bundled_lnresearch_dataset_loads_once(self):
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.executescript(feehistory.SCHEMA)
+        written = feehistory.load_datasets(conn)
+        self.assertGreater(written, 1000)
+        self.assertEqual(feehistory.load_datasets(conn), 0)
+        first = conn.execute(
+            "SELECT day, p50, half_channels FROM fee_daily WHERE source = 'lnresearch' ORDER BY day LIMIT 1"
+        ).fetchone()
+        self.assertEqual(first[0], 1547942400)  # 2019-01-20
+        self.assertGreaterEqual(first[2], 20000)
+        payload = feehistory.history_payload(conn)
+        self.assertEqual(payload["series"][0]["source"], "lnresearch")
