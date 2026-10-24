@@ -379,7 +379,11 @@ function wireRotation() {
       event.preventDefault();
       event.stopPropagation();
       hideTip();
-      drag = { start: s.renderer.getCamera().getState().angle, from: pointerAngle(event), moved: false, button: event.button };
+      const camera = s.renderer.getCamera();
+      // Supersede any running pan/zoom/rotate animation (sigma has no public
+      // cancel) so it cannot keep writing its angle over the drag.
+      if (camera.isAnimated()) camera.animate(camera.getState(), { duration: 0 });
+      drag = { start: camera.getState().angle, from: pointerAngle(event), moved: false, button: event.button };
       el.classList.add("rotating");
       window.addEventListener("mousemove", onMove, true);
       window.addEventListener("mouseup", onUp, true);
