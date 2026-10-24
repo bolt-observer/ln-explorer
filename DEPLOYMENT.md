@@ -64,6 +64,29 @@ docker compose logs -f explorer
 
 The sqlite file lives in the `explorer-data` volume, so a container recreate does not re-download before it can serve.
 
+## Keeping the history across deploys
+
+All history (snapshots, fee history, events, rank history) lives in `/data/explorer.sqlite` inside the Docker volume. The volume is named `<compose project>_explorer-data`; the project defaults to the checkout directory name, so always deploy from the same directory (or set `COMPOSE_PROJECT_NAME`). `deploy/vm-deploy.sh` reuses the project of the running container automatically. Nothing in the app drops tables; retention only prunes rows older than each table's window.
+
+Redeploy on the VM with:
+
+```bash
+cd ~/explorer && git fetch origin && git checkout --detach origin/main && bash deploy/vm-deploy.sh   # the bolt-explorer VM uses project "explorer"
+```
+
+`deploy/vm-deploy.sh` takes an online sqlite backup into `~/backups/explorer-<UTC time>.sqlite` first (newest 5 kept), refuses to start without the volume when backups exist (set `ALLOW_NEW_VOLUME=1` to override), then rebuilds in the background (`/tmp/build.log`).
+
+A volume only disappears with `docker compose down -v`, `docker volume rm`, or a new VM. Restore a backup with (stop first; the restore drops stale WAL/SHM sidecars and keeps the app user as owner):
+
+```bash
+docker compose stop explorer 2>/dev/null || true
+docker run --rm -v <project>_explorer-data:/data -v ~/backups:/b alpine sh -c \
+  "rm -f /data/explorer.sqlite-wal /data/explorer.sqlite-shm && cp /b/explorer-YYYYMMDDTHHMMSSZ.sqlite /data/explorer.sqlite && chown -R 10001:10001 /data"
+docker compose up -d --build
+```
+
+Copy `~/backups` off the VM before deleting or recreating it.
+
 ## Switching the data source
 
 Default (`GRAPH_SOURCE=rgs`) is the right one for a small VM. The public snapshot is the bootstrap: the UI works as soon as it lands, which is seconds, not a node sync.
