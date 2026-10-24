@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>bolt.observer — revamp directions (low-fi)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+/* ---------- page shell (not part of any direction) ---------- */
+:root { --shell-bg:#e8e7e3; --shell-ink:#1c1c1a; --shell-muted:#6d6b65; --note:#ff5a36; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--shell-bg); color:var(--shell-ink); font:14px/1.5 system-ui, sans-serif; }
+.shell { max-width:1400px; margin:0 auto; padding:32px 32px 80px; }
+.shell > header h1 { margin:0; font-size:22px; letter-spacing:-.01em; }
+.shell > header p { margin:4px 0 0; color:var(--shell-muted); max-width:780px; }
+.dir-tabs { position:sticky; top:0; z-index:20; display:flex; gap:8px; padding:16px 0; background:var(--shell-bg); }
+.dir-tabs button { border:1px solid #c9c7c0; background:#f4f3ef; border-radius:8px; padding:8px 14px; cursor:pointer; font:inherit; text-align:left; }
+.dir-tabs button b { display:block; font-size:13px; }
+.dir-tabs button span { color:var(--shell-muted); font-size:12px; }
+.dir-tabs button[aria-selected="true"] { background:var(--shell-ink); color:#fff; border-color:var(--shell-ink); }
+.dir-tabs button[aria-selected="true"] span { color:#bbb; }
+.dir { display:none; }
+.dir.on { display:block; }
+.intro { display:grid; grid-template-columns: 1.3fr 1fr; gap:32px; padding:8px 0 28px; border-bottom:1px solid #d3d1ca; margin-bottom:28px; }
+.intro h2 { margin:0 0 6px; font-size:28px; letter-spacing:-.02em; }
+.intro .pitch { font-size:16px; margin:0 0 14px; }
+.intro dl { display:grid; grid-template-columns:110px 1fr; gap:4px 12px; margin:0; font-size:13px; }
+.intro dt { color:var(--shell-muted); }
+.intro dd { margin:0; }
+.mood { border-radius:10px; padding:18px; display:flex; flex-direction:column; gap:12px; }
+.mood .type-a { font-size:30px; line-height:1.1; }
+.mood .type-b { font-size:13px; opacity:.75; }
+.mood .sw { display:flex; gap:6px; }
+.mood .sw i { width:34px; height:34px; border-radius:6px; box-shadow:inset 0 0 0 1px rgba(128,128,128,.25); }
+.mood .meta { font:12px/1.4 ui-monospace, monospace; opacity:.6; }
+.screen { margin-bottom:44px; }
+.screen h3 { margin:0 0 10px; font-size:15px; }
+.screen h3 small { color:var(--shell-muted); font-weight:400; margin-left:6px; }
+.screen .row { display:flex; gap:28px; align-items:flex-start; overflow-x:auto; padding:4px 4px 12px; }
+.notes { margin:0; padding:0; list-style:none; counter-reset:n; min-width:280px; max-width:360px; font-size:13px; }
+.notes li { counter-increment:n; position:relative; padding:0 0 12px 30px; }
+.notes li::before { content:counter(n); position:absolute; left:0; top:1px; width:20px; height:20px; border-radius:50%; background:var(--note); color:#fff; font:600 11px/20px system-ui; text-align:center; }
+.shared { border-top:1px solid #d3d1ca; padding-top:24px; }
+.shared h2 { font-size:18px; margin:0 0 8px; }
+.shared ol { columns:2; column-gap:40px; margin:0; padding-left:18px; }
+.shared li { break-inside:avoid; margin-bottom:6px; }
+
+/* ---------- wireframe primitives ---------- */
+.wf { position:relative; flex:none; width:960px; height:600px; overflow:hidden; border-radius:10px;
+  background:var(--bg); color:var(--text); font:12px/1.4 var(--font-ui); box-shadow:0 0 0 1px rgba(0,0,0,.12), 0 24px 50px -24px rgba(0,0,0,.45); }
+.wf.mobile { width:300px; height:620px; border-radius:30px; box-shadow:0 0 0 6px #1c1c1a, 0 24px 50px -24px rgba(0,0,0,.45); }
+.wf * { box-sizing:border-box; }
+.wf .abs { position:absolute; }
+.wf .row { display:flex; align-items:center; gap:8px; }
+.wf .col { display:flex; flex-direction:column; gap:8px; }
+.wf .sp { flex:1; }
+.wf .muted { color:var(--muted); }
+.wf .mono, .wf .num { font-family:var(--font-num); font-variant-numeric:tabular-nums; }
+.wf .num { font-size:20px; letter-spacing:-.02em; }
+.wf .lbl { color:var(--muted); font-size:10.5px; }
+.wf .t { display:block; height:6px; border-radius:3px; background:var(--ink); width:var(--w,60%); }
+.wf .t + .t { margin-top:6px; }
+.wf .surface { background:var(--surface); border:1px solid var(--line); border-radius:10px; }
+.wf .hair { border-top:1px solid var(--line); }
+.wf .btn { display:inline-flex; align-items:center; justify-content:center; height:30px; padding:0 12px; border-radius:7px; border:1px solid var(--line); font-size:11.5px; white-space:nowrap; }
+.wf .btn.pri { background:var(--accent); color:var(--on-accent); border-color:transparent; font-weight:600; }
+.wf .kbd { font:10px var(--font-num); border:1px solid var(--line); border-radius:4px; padding:1px 5px; color:var(--muted); }
+.wf .chip { display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 9px; border-radius:6px; border:1px solid var(--line); font-size:11px; white-space:nowrap; }
+.wf .chip.dash { border-style:dashed; color:var(--muted); }
+.wf .chip.on { border-color:var(--accent); color:var(--accent); }
+.wf .tag { font-size:10px; padding:1px 6px; border-radius:4px; background:var(--ink); color:var(--muted); }
+.wf .dot { width:8px; height:8px; border-radius:50%; background:var(--accent); flex:none; }
+.wf .sw { width:10px; height:10px; border-radius:3px; background:var(--ink2); flex:none; }
+.wf .cap { display:block; height:4px; border-radius:2px; background:var(--ink); position:relative; overflow:hidden; }
+.wf .cap::after { content:""; position:absolute; inset:0 auto 0 0; width:var(--v,50%); background:var(--ink2); }
+.wf .cap.acc::after { background:var(--accent); }
+.wf .up { color:var(--pos); } .wf .down { color:var(--neg); }
+.wf .seg { display:inline-flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+.wf .seg span { padding:4px 10px; font-size:11px; color:var(--muted); }
+.wf .seg span.on { background:var(--ink); color:var(--text); }
+.wf .tabs { display:flex; gap:18px; border-bottom:1px solid var(--line); }
+.wf .tabs span { padding:0 0 8px; font-size:12px; color:var(--muted); }
+.wf .tabs span.on { color:var(--text); box-shadow:inset 0 -2px 0 var(--accent); }
+.wf .tbl { display:grid; font-size:11.5px; }
+.wf .tbl > div { display:grid; grid-template-columns:var(--cols); align-items:center; gap:10px; padding:0 12px; height:var(--rh,30px); border-bottom:1px solid var(--line); }
+.wf .tbl > div.h { color:var(--muted); font-size:10.5px; height:28px; }
+.wf .tbl > div.sel { background:var(--ink); box-shadow:inset 2px 0 0 var(--accent); }
+.wf .tbl .r { text-align:right; }
+.wf .n { position:absolute; z-index:9; width:20px; height:20px; border-radius:50%; background:var(--note); color:#fff;
+  font:600 11px/20px system-ui; text-align:center; box-shadow:0 0 0 3px rgba(255,90,54,.25); }
+.wf svg { display:block; }
+.wf svg .e { stroke:var(--edge); stroke-width:.6; fill:none; }
+.wf svg .ef { stroke:var(--accent); stroke-width:1.1; fill:none; opacity:.85; }
+.wf svg .v { fill:var(--node); }
+.wf svg .vh { fill:var(--node-hub); }
+.wf svg .vf { fill:var(--accent); }
+.wf svg .ring { fill:none; stroke:var(--accent); stroke-width:1.5; }
+.wf svg .lab { fill:var(--muted); font:10px var(--font-ui); }
+.wf svg .grid { stroke:var(--line); stroke-width:1; vector-effect:non-scaling-stroke; }
+.wf svg .ln { fill:none; stroke:var(--accent); stroke-width:1.6; vector-effect:non-scaling-stroke; }
+.wf svg .ln2 { fill:none; stroke:var(--ink2); stroke-width:1.4; vector-effect:non-scaling-stroke; }
+.wf svg .ln3 { fill:none; stroke:var(--ink2); stroke-width:1.2; stroke-dasharray:4 3; vector-effect:non-scaling-stroke; }
+.wf svg .ar { fill:var(--accent); opacity:.12; }
+.wf svg .bar { fill:var(--ink2); }
+.wf svg .bar.acc { fill:var(--accent); }
+.wf svg .bar.neg { fill:var(--neg); opacity:.7; }
+
+/* ---------- direction themes ---------- */
+.dir-a .wf { --bg:#0b0d0d; --surface:rgba(20,24,24,.92); --line:#252a2a; --text:#e7ebe9; --muted:#7c8683; --ink:#222827; --ink2:#3b4644;
+  --accent:#2ef2b5; --on-accent:#03261b; --pos:#2ef2b5; --neg:#ff8a6b; --edge:#1b2726; --node:#34413f; --node-hub:#6a7a77;
+  --font-ui:'IBM Plex Sans', system-ui, sans-serif; --font-num:'IBM Plex Mono', ui-monospace, monospace; }
+.dir-b .wf { --bg:#f6f4ee; --surface:#fffdf8; --line:#e4e0d6; --text:#1b1a17; --muted:#8b867b; --ink:#e9e5db; --ink2:#c9c3b5;
+  --accent:#0d6b4f; --on-accent:#fff; --pos:#0d6b4f; --neg:#b4471f; --edge:#e2ddd1; --node:#cfc9bb; --node-hub:#8f897c;
+  --font-ui:'Instrument Sans', system-ui, sans-serif; --font-num:'JetBrains Mono', ui-monospace, monospace; --font-display:'Fraunces', Georgia, serif; }
+.dir-c .wf { --bg:#09090b; --surface:#111114; --line:#222227; --text:#ececef; --muted:#74747d; --ink:#1d1d22; --ink2:#3a3a42;
+  --accent:#1dfebb; --on-accent:#04261b; --pos:#1dfebb; --neg:#ff7a7a; --edge:#1e2423; --node:#30363a; --node-hub:#5c666a;
+  --font-ui:'Geist', system-ui, sans-serif; --font-num:'Geist Mono', ui-monospace, monospace; }
+.dir-b .wf .serif { font-family:var(--font-display); letter-spacing:-.02em; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>bolt.observer: revamp directions</h1>
+    <p>These are low-fidelity wireframes. They show layout, hierarchy and interaction model, not final visuals. Grey bars stand for text, and the accent colour marks emphasis or selection. Red pins match the notes on the right. The full audit is in <code>AUDIT.md</code>.</p>
+    <p><b>Chosen direction: A · Atlas.</b> High-fidelity mockups are in <a href="atlas/index.html">atlas/index.html</a>.</p>
+  </header>
+
+  <nav class="dir-tabs" role="tablist">
+    <button role="tab" data-dir="a" aria-selected="true"><b>A · Atlas</b><span>Map-first, immersive</span></button>
+    <button role="tab" data-dir="b" aria-selected="false"><b>B · Ledger</b><span>Search-first, editorial</span></button>
+    <button role="tab" data-dir="c" aria-selected="false"><b>C · Console</b><span>Pro tool, master–detail</span></button>
+  </nav>
+
+  <!-- =============================== A · ATLAS =============================== -->
+  <section class="dir dir-a on" id="a">
+    <div class="intro">
+      <div>
+        <h2>A · Atlas</h2>
+        <p class="pitch">The graph is the app. It runs edge to edge, the controls float over it, and everything else opens as an inspector or sheet on top of the map, so you never lose your place.</p>
+        <dl>
+          <dt>Best if</dt><dd>The graph is the brand and the reason people visit. You want a memorable, "instrument panel" feel.</dd>
+          <dt>Strength</dt><dd>Clicking a node shows its neighbourhood in place. Exploration feels continuous, and it looks clearly different from mempool or amboss.</dd>
+          <dt>Tradeoff</dt><dd>It's the hardest to make accessible and to use on mobile. Table-heavy work (filtering 5k nodes) feels secondary. WebGL performance becomes a UX dependency.</dd>
+        </dl>
+      </div>
+      <div class="mood" style="background:#0b0d0d;color:#e7ebe9">
+        <div class="type-a" style="font-family:'IBM Plex Sans';font-weight:500">ACINQ <span style="font-family:'IBM Plex Mono';color:#2ef2b5">363.25 BTC</span></div>
+        <div class="type-b" style="font-family:'IBM Plex Sans'">IBM Plex Sans + Plex Mono · near-black, one luminous mint accent, translucent panels</div>
+        <div class="sw"><i style="background:#0b0d0d"></i><i style="background:#141818"></i><i style="background:#3b4644"></i><i style="background:#7c8683"></i><i style="background:#e7ebe9"></i><i style="background:#2ef2b5"></i><i style="background:#ff8a6b"></i></div>
+        <div class="meta">dark only · 8px radius · no shadows, backdrop blur on panels</div>
+      </div>
+    </div>
+
+    <!-- A1 -->
+    <article class="screen">
+      <h3>Home: graph with node inspector open<small>desktop 1440 → scaled</small></h3>
+      <div class="row">
+        <div class="wf">
+          <svg class="gph abs" style="inset:0" data-seed="11" data-n="460" data-cx="0.4" data-focus></svg>
+          <div class="abs row" style="top:14px;left:16px;right:16px">
+            <div class="row" style="gap:8px;font-weight:600"><span class="dot"></span>bolt.observer</div>
+            <div class="surface row" style="margin-left:150px;width:380px;height:34px;padding:0 12px;border-radius:9px"><span class="muted">⌕ Search alias, pubkey, channel id…</span><span class="sp"></span><span class="kbd">⌘K</span></div>
+            <span class="sp"></span>
+            <div class="row muted" style="gap:18px"><span>Nodes</span><span>Rankings</span><span>Stats</span></div>
+          </div>
+          <aside class="abs surface col" style="right:14px;top:62px;bottom:14px;width:290px;padding:16px;gap:12px">
+            <div class="row"><span class="dot"></span><b style="font-size:17px">ACINQ</b><span class="sp"></span><span class="muted">✕</span></div>
+            <div class="row"><span class="mono muted">03864e…7a3f8f ⧉</span><span class="tag">ipv4</span><span class="tag">tor</span><span class="tag">US</span></div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px" class="hair">
+              <div style="padding-top:10px"><div class="lbl">Capacity</div><div class="mono" style="font-size:15px">363.25</div><div class="lbl">BTC</div></div>
+              <div style="padding-top:10px"><div class="lbl">Channels</div><div class="mono" style="font-size:15px">1,900</div><div class="lbl">1,809 routable</div></div>
+              <div style="padding-top:10px"><div class="lbl">Centrality</div><div class="mono" style="font-size:15px">#1</div><div class="lbl">betweenness</div></div>
+            </div>
+            <div><div class="lbl">Capacity · 90d</div><svg class="chart" data-kind="area" data-seed="4" style="width:100%;height:44px"></svg></div>
+            <div class="col" style="gap:7px"><div class="lbl">Largest peers</div>
+              <div class="row"><span style="width:90px">bfx-lnd0</span><span class="cap acc sp" style="--v:92%"></span><span class="mono muted" style="width:44px;text-align:right">42.1</span></div>
+              <div class="row"><span style="width:90px">bfx-lnd1</span><span class="cap sp" style="--v:70%"></span><span class="mono muted" style="width:44px;text-align:right">31.0</span></div>
+              <div class="row"><span style="width:90px">fixedfloat</span><span class="cap sp" style="--v:40%"></span><span class="mono muted" style="width:44px;text-align:right">17.6</span></div>
+              <div class="row"><span style="width:90px">okx</span><span class="cap sp" style="--v:28%"></span><span class="mono muted" style="width:44px;text-align:right">12.4</span></div>
+            </div>
+            <span class="sp"></span>
+            <div class="btn pri">Open full profile →</div>
+            <div class="row"><div class="btn sp">Route from here…</div><div class="btn sp">Copy key</div></div>
+          </aside>
+          <div class="abs surface col" style="left:16px;bottom:52px;padding:10px 12px;gap:6px;width:200px">
+            <div class="row lbl"><span>Density</span><span class="sp"></span><span>top 400</span></div>
+            <span class="cap acc" style="--v:55%"></span>
+            <div class="row lbl" style="gap:10px"><span>● size = capacity</span><span>● bright = hub</span></div>
+          </div>
+          <div class="abs row muted mono" style="left:16px;bottom:18px;font-size:10.5px;gap:10px"><span class="dot" style="width:6px;height:6px"></span>5,110 nodes · 26,654 channels · 3,795 BTC · synced 2h ago</div>
+          <div class="abs surface col" style="right:320px;bottom:14px;padding:4px;gap:2px;text-align:center;width:30px"><span>+</span><span>−</span><span>⟲</span></div>
+          <b class="n" style="left:178px;top:20px">1</b>
+          <b class="n" style="left:300px;top:250px">2</b>
+          <b class="n" style="right:296px;top:70px">3</b>
+          <b class="n" style="left:220px;bottom:96px">4</b>
+          <b class="n" style="left:340px;bottom:14px">5</b>
+        </div>
+        <ol class="notes">
+          <li><b>Search becomes the command bar.</b> It's centred over the map, opens with ⌘K or /, and shows typeahead results across aliases, pubkeys and SCIDs. Picking a node flies the camera to it.</li>
+          <li><b>Selecting a node lights up its neighbourhood.</b> Its edges turn accent and everything else dims, and the URL updates (<code>/?node=…</code>). Today a click navigates away.</li>
+          <li><b>Inspector instead of navigation.</b> Shows the three numbers that matter, a 90-day trend, and the largest peers with capacity bars. The full profile is one click further.</li>
+          <li><b>Density slider and legend</b> replace the "Min channels" input and Apply button. Labels only appear for hubs and on hover, so nothing overlaps.</li>
+          <li><b>Network pulse</b> moves from the footer into a quiet status line on the map. The "rgs" jargon is gone.</li>
+        </ol>
+      </div>
+    </article>
+
+    <!-- A2 -->
+    <article class="screen">
+      <h3>Node profile: neighbourhood hero</h3>
+      <div class="row">
+        <div class="wf">
+          <svg class="gph abs" style="left:0;right:0;top:0;height:250px;width:100%" data-seed="5" data-n="200" data-ego data-h="250"></svg>
+          <div class="abs" style="left:0;right:0;top:150px;height:100px;background:linear-gradient(transparent,var(--bg))"></div>
+          <div class="abs row" style="top:14px;left:16px;right:16px">
+            <div class="row" style="gap:8px;font-weight:600"><span class="dot"></span>bolt.observer</div>
+            <div class="surface row" style="margin-left:150px;width:380px;height:34px;padding:0 12px;border-radius:9px"><span class="muted">⌕ Search…</span><span class="sp"></span><span class="kbd">⌘K</span></div>
+            <span class="sp"></span><div class="row muted" style="gap:18px"><span>Nodes</span><span>Rankings</span><span>Stats</span></div>
+          </div>
+          <div class="abs row muted" style="top:62px;left:16px;gap:6px">◂ Back to map</div>
+          <div class="abs col" style="left:32px;top:178px;gap:6px">
+            <div class="row" style="gap:10px"><b style="font-size:30px;letter-spacing:-.02em">ACINQ</b><span class="tag">ipv4</span><span class="tag">tor</span></div>
+            <div class="row muted"><span class="mono">03864ef025…7a3f8f ⧉</span><span>· United States · since Apr 2018</span></div>
+          </div>
+          <div class="abs row" style="right:32px;top:206px;gap:8px"><div class="btn">Route from…</div><div class="btn pri">Show on map</div></div>
+          <div class="abs" style="left:32px;right:32px;top:268px">
+            <div class="tabs"><span class="on">Overview</span><span>Channels 1,900</span><span>Fees</span><span>Rankings</span><span>History</span></div>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-top:16px" >
+              <div><div class="lbl">Capacity</div><div class="num">363.25 <span class="muted" style="font-size:12px">BTC</span></div><div class="lbl up">▲ 2.1% 30d</div></div>
+              <div><div class="lbl">Channels</div><div class="num">1,900</div><div class="lbl">1,809 routable</div></div>
+              <div><div class="lbl">Median out fee</div><div class="num">499 <span class="muted" style="font-size:12px">ppm</span></div><div class="lbl">base 1 sat</div></div>
+              <div><div class="lbl">Centrality</div><div class="num">#1</div><div class="lbl">betweenness · closeness · eigen</div></div>
+            </div>
+            <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:28px;margin-top:22px">
+              <div><div class="row"><b>Channel sizes</b><span class="sp"></span><span class="lbl">BTC</span></div><svg class="chart" data-kind="hist" data-seed="9" style="width:100%;height:120px;margin-top:8px"></svg></div>
+              <div class="col" style="gap:9px"><div class="row"><b>Outgoing fees vs network</b></div>
+                <div class="row"><span class="lbl" style="width:70px">ACINQ</span><span class="cap acc sp" style="--v:62%"></span><span class="mono" style="width:40px;text-align:right">499</span></div>
+                <div class="row"><span class="lbl" style="width:70px">Network</span><span class="cap sp" style="--v:22%"></span><span class="mono muted" style="width:40px;text-align:right">170</span></div>
+                <div class="t" style="--w:90%;margin-top:6px"></div><div class="t" style="--w:70%"></div>
+              </div>
+            </div>
+          </div>
+          <b class="n" style="left:470px;top:110px">1</b>
+          <b class="n" style="left:8px;top:262px">2</b>
+          <b class="n" style="left:8px;top:322px">3</b>
+          <b class="n" style="left:360px;top:420px">4</b>
+        </div>
+        <ol class="notes">
+          <li><b>The node's ego network is the hero.</b> It's the same visual language as the map, so the profile feels like zooming in rather than leaving.</li>
+          <li><b>Tabs break up the 76-page channel table.</b> The overview summarises it, and the full table lives under Channels with filter chips.</li>
+          <li><b>Four KPIs, one unit.</b> Capacity in BTC (exact sats on hover and copy), with a 30-day delta. The four rank tiles collapse into one "Centrality" stat with detail on hover.</li>
+          <li><b>Distributions instead of raw rows.</b> A channel-size histogram and fee-versus-network bars show what kind of node this is at a glance.</li>
+        </ol>
+      </div>
+    </article>
+
+    <!-- A3 -->
+    <article class="screen">
+      <h3>Stats: sheet over the map</h3>
+      <div class="row">
+        <div class="wf">
+          <svg class="gph abs" style="inset:0;opacity:.35" data-seed="11" data-n="460" data-cx="0.5"></svg>
+          <div class="abs surface" style="left:40px;right:40px;top:44px;bottom:-12px;padding:22px 26px;border-radius:14px">
+            <div class="row"><div style="width:36px;height:4px;border-radius:2px;background:var(--ink2);margin:-12px auto 10px"></div></div>
+            <div class="row"><b style="font-size:20px">Network</b><span class="muted">ⓘ</span><span class="sp"></span>
+              <div class="seg"><span class="on">Capacity</span><span>Channels</span><span>Nodes</span><span>Fees</span></div>
+              <div class="seg"><span>1y</span><span>3y</span><span class="on">All</span></div><div class="seg"><span class="on">BTC</span><span>USD</span></div></div>
+            <div style="display:grid;grid-template-columns:1fr 220px;gap:28px;margin-top:18px">
+              <div><svg class="chart" data-kind="line" data-series="2" data-seed="21" style="width:100%;height:250px"></svg>
+                <div class="row lbl" style="gap:16px;margin-top:6px"><span>— mempool.space</span><span>- - own snapshots</span><span class="sp"></span><span>2018 → 2026</span></div></div>
+              <div class="col" style="gap:14px">
+                <div><div class="lbl">Capacity</div><div class="num">3,795 <span class="muted" style="font-size:12px">BTC</span></div><div class="lbl">$304M · as of Aug 30 ⓘ</div></div>
+                <div class="hair"></div>
+                <div><div class="lbl">Channels</div><div class="num">26,654</div><div class="lbl up">▲ 312 this week</div></div>
+                <div class="hair"></div>
+                <div><div class="lbl">Median fee</div><div class="num">170 <span class="muted" style="font-size:12px">ppm</span></div><div class="lbl">base 100 msat</div></div>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:28px;margin-top:22px">
+              <div><b>Opens vs closes</b><svg class="chart" data-kind="pm" data-seed="3" style="width:100%;height:70px;margin-top:6px"></svg></div>
+              <div><b>Fee distribution</b><svg class="chart" data-kind="hist" data-seed="12" style="width:100%;height:70px;margin-top:6px"></svg></div>
+              <div><b>Close reasons</b><div class="col" style="gap:6px;margin-top:8px"><span class="cap acc" style="--v:64%"></span><span class="cap" style="--v:30%"></span><span class="cap" style="--v:9%"></span></div></div>
+            </div>
+          </div>
+          <b class="n" style="left:150px;top:68px">1</b>
+          <b class="n" style="right:60px;top:110px">2</b>
+          <b class="n" style="left:46px;top:470px">3</b>
+        </div>
+        <ol class="notes">
+          <li><b>Pages are sheets on top of the map.</b> Dismissing the sheet takes you back to exactly where you were. The ⓘ next to the title holds the methodology paragraphs that sit inline today.</li>
+          <li><b>One chart with a metric switcher</b> replaces three stacked panels. KPIs sit beside it, and source caveats move into tooltips.</li>
+          <li><b>Small multiples answer questions.</b> "Are channels growing?", "What do people charge?", "Why do channels close?" The raw fee table with values like 2,147,483,647 goes to a details drawer.</li>
+        </ol>
+      </div>
+    </article>
+
+    <!-- A4 -->
+    <article class="screen">
+      <h3>Mobile: map with bottom sheet</h3>
+      <div class="row">
+        <div class="wf mobile">
+          <svg class="gph abs" style="inset:0" data-seed="11" data-n="260" data-cx="0.5" data-cy="0.38" data-focus data-w="300" data-h="620"></svg>
+          <div class="abs row" style="top:40px;left:14px;right:14px"><div class="surface row sp" style="height:38px;padding:0 12px;border-radius:10px"><span class="dot"></span><span class="muted" style="margin-left:4px">Search the network</span></div><div class="surface" style="width:38px;height:38px;border-radius:10px;display:grid;place-items:center">☰</div></div>
+          <div class="abs surface col" style="left:0;right:0;bottom:0;height:250px;border-radius:18px 18px 0 0;padding:10px 18px;gap:12px">
+            <div style="width:36px;height:4px;border-radius:2px;background:var(--ink2);margin:0 auto"></div>
+            <div class="row"><span class="dot"></span><b style="font-size:17px">ACINQ</b><span class="sp"></span><span class="mono muted">#1</span></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <div><div class="lbl">Capacity</div><div class="mono" style="font-size:16px">363.25 BTC</div></div>
+              <div><div class="lbl">Channels</div><div class="mono" style="font-size:16px">1,900</div></div>
+            </div>
+            <svg class="chart" data-kind="area" data-seed="4" style="width:100%;height:40px"></svg>
+            <div class="btn pri">Open profile</div>
+          </div>
+          <b class="n" style="left:200px;top:46px">1</b>
+          <b class="n" style="right:20px;top:390px">2</b>
+        </div>
+        <ol class="notes">
+          <li><b>One floating search bar.</b> The three header rows that take about 200px today collapse into it, with the menu behind ☰.</li>
+          <li><b>Bottom sheet, standard map-app pattern.</b> It peeks with a summary and drags up into the full profile. Tables become card lists inside it.</li>
+        </ol>
+      </div>
+    </article>
+  </section>
+
+  <!-- =============================== B · LEDGER =============================== -->
+  <section class="dir dir-b" id="b">
+    <div class="intro">
+      <div>
+        <h2>B · Ledger</h2>
+        <p class="pitch">Quiet and typographic, like a well-made reference site. You start with a search box and a handful of headline numbers. Node pages read like documents, and the graph becomes one destination among several.</p>
+        <dl>
+          <dt>Best if</dt><dd>Most visitors arrive with a pubkey or alias to look up, and you want the most trustworthy, readable result.</dd>
+          <dt>Strength</dt><dd>Fastest route to an answer. Best accessibility and mobile behaviour. Prose summaries ("#3 by capacity") help newcomers. Light theme stands out in a dark-mode-heavy niche.</dd>
+          <dt>Tradeoff</dt><dd>Less spectacle. The graph loses its hero spot. Power users filtering thousands of nodes may want more density than this gives by default.</dd>
+        </dl>
+      </div>
+      <div class="mood" style="background:#f6f4ee;color:#1b1a17;box-shadow:inset 0 0 0 1px #e4e0d6">
+        <div class="type-a" style="font-family:'Fraunces';font-weight:400;letter-spacing:-.02em">ACINQ <span style="font-family:'JetBrains Mono';font-size:22px;color:#0d6b4f">363.25 BTC</span></div>
+        <div class="type-b" style="font-family:'Instrument Sans'">Fraunces display + Instrument Sans + JetBrains Mono numerals · paper, ink, one deep green</div>
+        <div class="sw"><i style="background:#f6f4ee"></i><i style="background:#fffdf8"></i><i style="background:#e4e0d6"></i><i style="background:#8b867b"></i><i style="background:#1b1a17"></i><i style="background:#0d6b4f"></i><i style="background:#b4471f"></i></div>
+        <div class="meta">light default + dark variant · hairlines, no cards · 760px reading column</div>
+      </div>
+    </div>
+
+    <!-- B1 -->
+    <article class="screen">
+      <h3>Home: search-first with typeahead open</h3>
+      <div class="row">
+        <div class="wf">
+          <div class="abs row" style="top:0;left:0;right:0;height:52px;padding:0 32px;border-bottom:1px solid var(--line)">
+            <b class="serif" style="font-size:18px">bolt.observer</b><span class="sp"></span>
+            <div class="row muted" style="gap:22px"><span>Nodes</span><span>Channels</span><span>Rankings</span><span>Stats</span><span>Graph ↗</span></div>
+          </div>
+          <div class="abs col" style="left:200px;right:200px;top:86px;align-items:center;gap:10px;text-align:center">
+            <div class="lbl" style="letter-spacing:.08em">LIGHTNING NETWORK EXPLORER</div>
+            <div class="serif" style="font-size:34px;line-height:1.1">Look up any node, channel or key.</div>
+          </div>
+          <div class="abs" style="left:200px;right:200px;top:186px">
+            <div class="row" style="height:48px;padding:0 16px;background:var(--surface);border:1px solid var(--text);border-radius:10px;font-size:15px">acin<span style="width:1px;height:18px;background:var(--text)"></span><span class="sp"></span><span class="kbd">/</span></div>
+            <div style="margin-top:6px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:6px;box-shadow:0 12px 30px -12px rgba(0,0,0,.18)">
+              <div class="lbl" style="padding:4px 10px">Nodes</div>
+              <div class="row" style="padding:8px 10px;border-radius:6px;background:var(--ink)"><span class="sw" style="background:var(--accent)"></span><b>ACINQ</b><span class="mono muted">03864e…7a3f8f</span><span class="sp"></span><span class="mono">363.25 BTC</span><span class="kbd">↵</span></div>
+              <div class="row" style="padding:8px 10px"><span class="sw"></span><span>ACINQ-testnet-mirror</span><span class="mono muted">02a1c0…91ee</span><span class="sp"></span><span class="mono muted">0.84 BTC</span></div>
+              <div class="lbl" style="padding:4px 10px">Channels</div>
+              <div class="row" style="padding:8px 10px"><span class="sw"></span><span>ACINQ ↔ bfx-lnd0</span><span class="mono muted">811984x2037x0</span><span class="sp"></span><span class="mono muted">5.00 BTC</span></div>
+            </div>
+          </div>
+          <div class="abs" style="left:64px;right:64px;top:416px;display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line);border-bottom:1px solid var(--line);white-space:nowrap">
+            <div style="padding:16px 18px;border-right:1px solid var(--line)"><div class="lbl">Nodes</div><div class="row"><span class="num">5,110</span><span class="sp"></span><svg class="chart" data-kind="spark" data-seed="2" style="width:64px;height:22px"></svg></div></div>
+            <div style="padding:16px 18px;border-right:1px solid var(--line)"><div class="lbl">Channels</div><div class="row"><span class="num">26,654</span><span class="sp"></span><svg class="chart" data-kind="spark" data-seed="6" style="width:64px;height:22px"></svg></div></div>
+            <div style="padding:16px 18px;border-right:1px solid var(--line)"><div class="lbl">Capacity</div><div class="row"><span class="num">3,795 BTC</span><span class="sp"></span><svg class="chart" data-kind="spark" data-seed="8" style="width:64px;height:22px"></svg></div></div>
+            <div style="padding:16px 18px"><div class="lbl">Median fee</div><div class="row"><span class="num">170 ppm</span><span class="sp"></span><svg class="chart" data-kind="spark" data-seed="13" style="width:64px;height:22px"></svg></div></div>
+          </div>
+          <div class="abs" style="left:64px;right:64px;top:506px;display:grid;grid-template-columns:1fr 1fr 220px;gap:36px">
+            <div><b class="serif" style="font-size:16px">Biggest movers this week</b><div class="t" style="--w:90%;margin-top:12px"></div><div class="t" style="--w:80%"></div><div class="t" style="--w:85%"></div></div>
+            <div><b class="serif" style="font-size:16px">Opened &amp; closed</b><div class="t" style="--w:88%;margin-top:12px"></div><div class="t" style="--w:76%"></div><div class="t" style="--w:82%"></div></div>
+            <div style="border:1px solid var(--line);border-radius:8px;height:76px;overflow:hidden;position:relative"><svg class="gph abs" style="inset:0" data-seed="3" data-n="120" data-w="220" data-h="76"></svg><span class="abs" style="left:10px;bottom:8px;font-size:11px;background:var(--surface);padding:1px 6px;border-radius:4px">Explore the graph →</span></div>
+          </div>
+          <b class="n" style="left:178px;top:198px">1</b>
+          <b class="n" style="right:178px;top:292px">2</b>
+          <b class="n" style="left:40px;top:432px">3</b>
+          <b class="n" style="right:40px;top:506px">4</b>
+        </div>
+        <ol class="notes">
+          <li><b>Search is the hero.</b> It's focused on load, and <span class="kbd">/</span> brings it back from anywhere. Input accepts alias, pubkey, SCID or <code>NxNxN</code>.</li>
+          <li><b>Grouped typeahead.</b> ↵ opens the top result directly, so the extra results page disappears for exact matches. Channels show as "A ↔ B", not just an id.</li>
+          <li><b>Four headline numbers</b> in a hairline strip with sparklines and no cards. The caveats go behind hover.</li>
+          <li><b>The graph is a destination.</b> It gets a thumbnail entry point and its own full-screen page. Below the fold: movers and opens/closes, written as short readable lists.</li>
+        </ol>
+      </div>
+    </article>
+
+    <!-- B2 -->
+    <article class="screen">
+      <h3>Node page: document layout</h3>
+      <div class="row">
+        <div class="wf">
+          <div class="abs row" style="top:0;left:0;right:0;height:52px;padding:0 32px;border-bottom:1px solid var(--line)">
+            <b class="serif" style="font-size:18px">bolt.observer</b>
+            <div class="row" style="margin-left:40px;width:300px;height:30px;padding:0 10px;border:1px solid var(--line);border-radius:7px;background:var(--surface)"><span class="muted">Search…</span><span class="sp"></span><span class="kbd">/</span></div>
+            <span class="sp"></span><div class="row muted" style="gap:22px"><span>Nodes</span><span>Channels</span><span>Rankings</span><span>Stats</span><span>Graph ↗</span></div>
+          </div>
+          <nav class="abs col" style="left:32px;top:96px;width:130px;gap:10px;font-size:12px">
+            <span style="box-shadow:inset 2px 0 0 var(--accent);padding-left:10px">Overview</span>
+            <span class="muted" style="padding-left:10px">Channels</span><span class="muted" style="padding-left:10px">Fees</span><span class="muted" style="padding-left:10px">Rankings</span><span class="muted" style="padding-left:10px">History</span><span class="muted" style="padding-left:10px">Route finder</span>
+          </nav>
+          <div class="abs" style="left:210px;width:540px;top:78px">
+            <div class="lbl">Nodes / ACINQ</div>
+            <div class="row" style="margin-top:6px;gap:12px"><span class="serif" style="font-size:40px;line-height:1.05">ACINQ</span><span class="tag">ipv4</span><span class="tag">tor</span></div>
+            <p style="font-size:14px;line-height:1.55;margin:10px 0 0;max-width:500px">Runs <b class="mono">1,900</b> public channels holding <b class="mono">363.25 BTC</b>, the <b>3rd largest</b> node by capacity and the most central by betweenness. Announced since April 2018.</p>
+            <div class="row" style="margin-top:12px"><span class="mono muted" style="font-size:11px">03864ef025fde8fb587d…66597a3f8f</span><span class="chip">Copy</span><span class="chip">Show in graph</span></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;column-gap:32px;margin-top:22px;border-top:1px solid var(--line)">
+              <div class="row" style="height:34px;border-bottom:1px solid var(--line)"><span class="muted">Capacity</span><span class="sp"></span><span class="mono">363.25 BTC</span></div>
+              <div class="row" style="height:34px;border-bottom:1px solid var(--line)"><span class="muted">Median out fee</span><span class="sp"></span><span class="mono">499 ppm</span></div>
+              <div class="row" style="height:34px;border-bottom:1px solid var(--line)"><span class="muted">Channels</span><span class="sp"></span><span class="mono">1,900 <span class="muted">(1,809 routable)</span></span></div>
+              <div class="row" style="height:34px;border-bottom:1px solid var(--line)"><span class="muted">Median base fee</span><span class="sp"></span><span class="mono">1 sat</span></div>
+              <div class="row" style="height:34px;border-bottom:1px solid var(--line)"><span class="muted">Location</span><span class="sp"></span><span>United States</span></div>
+              <div class="row" style="height:34px;border-bottom:1px solid var(--line)"><span class="muted">Addresses</span><span class="sp"></span><span class="mono">2 ▾</span></div>
+            </div>
+            <div class="row" style="margin-top:26px"><span class="serif" style="font-size:22px">Channels</span><span class="sp"></span><span class="chip dash">+ Filter</span><span class="chip">Largest first ▾</span></div>
+            <div class="tbl" style="--cols:1.4fr 1fr .8fr .6fr .6fr;margin-top:8px">
+              <div class="h"><span>Peer</span><span>Channel</span><span class="r">Capacity</span><span class="r">Out</span><span class="r">In</span></div>
+              <div><span>bfx-lnd0</span><span class="mono muted">811984x2037x0</span><span class="r mono">5.00</span><span class="r mono">2,499</span><span class="r mono">1</span></div>
+              <div><span>bfx-lnd1</span><span class="mono muted">868808x1568x0</span><span class="r mono">5.00</span><span class="r mono">3,499</span><span class="r mono">1</span></div>
+            </div>
+          </div>
+          <aside class="abs col" style="left:790px;width:140px;top:150px;gap:16px;font-size:11px">
+            <div><div class="lbl">Rank · capacity</div><div class="serif" style="font-size:26px">#3</div><div class="up">▲ 1 this week</div></div>
+            <div><div class="lbl">Rank · betweenness</div><div class="serif" style="font-size:26px">#1</div><div class="muted">unchanged</div></div>
+            <div><div class="lbl">Capacity, 90 days</div><svg class="chart" data-kind="spark" data-seed="4" style="width:130px;height:30px;margin-top:4px"></svg></div>
+          </aside>
+          <b class="n" style="left:10px;top:96px">1</b>
+          <b class="n" style="left:186px;top:166px">2</b>
+          <b class="n" style="left:186px;top:298px">3</b>
+          <b class="n" style="right:22px;top:150px">4</b>
+        </div>
+        <ol class="notes">
+          <li><b>Sticky table of contents.</b> Long profiles scroll as one document, and the "shortest path" tool gets its own clearly named section.</li>
+          <li><b>A generated summary sentence</b> carries the key facts and rank. Newcomers understand it without knowing what "eigenvector" means.</li>
+          <li><b>A hairline facts table</b> replaces eight equal tiles. Long data such as onion addresses folds behind "2 ▾".</li>
+          <li><b>Margin notes</b> for ranks and trend, editorial style. They stay visible while you scroll the channel list.</li>
+        </ol>
+      </div>
+    </article>
+
+    <!-- B3 -->
+    <article class="screen">
+      <h3>Nodes index: filter chips and a scannable table</h3>
+      <div class="row">
+        <div class="wf">
+          <div class="abs row" style="top:0;left:0;right:0;height:52px;padding:0 32px;border-bottom:1px solid var(--line)">
+            <b class="serif" style="font-size:18px">bolt.observer</b>
+            <div class="row" style="margin-left:40px;width:300px;height:30px;padding:0 10px;border:1px solid var(--line);border-radius:7px;background:var(--surface)"><span class="muted">Search…</span><span class="sp"></span><span class="kbd">/</span></div>
+            <span class="sp"></span><div class="row muted" style="gap:22px"><span style="color:var(--text)">Nodes</span><span>Channels</span><span>Rankings</span><span>Stats</span><span>Graph ↗</span></div>
+          </div>
+          <div class="abs" style="left:64px;right:64px;top:78px">
+            <div class="row" style="align-items:baseline;gap:12px"><span class="serif" style="font-size:30px">Nodes</span><span class="muted">5,110 public · 412 match</span></div>
+            <div class="row" style="margin-top:14px;flex-wrap:wrap">
+              <div class="row" style="width:220px;height:26px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface)"><span class="muted">Filter by alias or key</span></div>
+              <span class="chip on">Channels &gt; 100 ✕</span><span class="chip on">Tor ✕</span><span class="chip dash">+ Add filter</span><span class="sp"></span><span class="chip">Columns ▾</span><span class="chip">Export</span>
+            </div>
+            <div class="tbl" style="--cols:2fr 1.6fr .7fr .7fr .8fr .6fr;--rh:36px;margin-top:14px">
+              <div class="h"><span>Node</span><span>Capacity ▾</span><span class="r">Channels</span><span class="r">Fee ppm</span><span class="r">Centrality</span><span class="r">7d</span></div>
+              <div><span class="col" style="gap:1px"><span>bfx-lnd0</span><span class="mono muted" style="font-size:10px">033d86…83e025</span></span><span class="row"><span class="cap acc sp" style="--v:100%"></span><span class="mono" style="width:64px;text-align:right">425.28</span></span><span class="r mono">454</span><span class="r mono">1</span><span class="r mono">#17</span><span class="r up mono">▲2</span></div>
+              <div><span class="col" style="gap:1px"><span>Binance</span><span class="mono muted" style="font-size:10px">03a1f3…d6a72f</span></span><span class="row"><span class="cap sp" style="--v:86%"></span><span class="mono" style="width:64px;text-align:right">368.08</span></span><span class="r mono">210</span><span class="r mono">0</span><span class="r mono">#127</span><span class="r mono muted">—</span></div>
+              <div><span class="col" style="gap:1px"><span>ACINQ</span><span class="mono muted" style="font-size:10px">03864e…7a3f8f</span></span><span class="row"><span class="cap sp" style="--v:85%"></span><span class="mono" style="width:64px;text-align:right">363.25</span></span><span class="r mono">1,900</span><span class="r mono">499</span><span class="r mono">#1</span><span class="r mono muted">—</span></div>
+              <div><span class="col" style="gap:1px"><span>bfx-lnd1</span><span class="mono muted" style="font-size:10px">03cde6…c201d6</span></span><span class="row"><span class="cap sp" style="--v:65%"></span><span class="mono" style="width:64px;text-align:right">277.54</span></span><span class="r mono">413</span><span class="r mono">1</span><span class="r mono">#14</span><span class="r down mono">▼1</span></div>
+              <div><span class="col" style="gap:1px"><span>block-iad-1</span><span class="mono muted" style="font-size:10px">027100…b54190</span></span><span class="row"><span class="cap sp" style="--v:62%"></span><span class="mono" style="width:64px;text-align:right">264.50</span></span><span class="r mono">1,390</span><span class="r mono">999</span><span class="r mono">#13</span><span class="r mono muted">—</span></div>
+              <div><span class="col" style="gap:1px"><span>LNBiG [Hub-2]</span><span class="mono muted" style="font-size:10px">033e9c…15b9c7</span></span><span class="row"><span class="cap sp" style="--v:60%"></span><span class="mono" style="width:64px;text-align:right">254.87</span></span><span class="r mono">431</span><span class="r mono">200</span><span class="r mono">#11</span><span class="r up mono">▲1</span></div>
+              <div><span class="col" style="gap:1px"><span>LNBiG [Hub-1]</span><span class="mono muted" style="font-size:10px">034ea8…76c0d5</span></span><span class="row"><span class="cap sp" style="--v:49%"></span><span class="mono" style="width:64px;text-align:right">207.08</span></span><span class="r mono">441</span><span class="r mono">200</span><span class="r mono">#9</span><span class="r mono muted">—</span></div>
+              <div><span class="col" style="gap:1px"><span>fixedfloat.com</span><span class="mono muted" style="font-size:10px">037f99…03a590</span></span><span class="row"><span class="cap sp" style="--v:43%"></span><span class="mono" style="width:64px;text-align:right">183.30</span></span><span class="r mono">180</span><span class="r mono">1</span><span class="r mono">#993</span><span class="r mono muted">—</span></div>
+              <div><span class="col" style="gap:1px"><span>cyberdyne.sh</span><span class="mono muted" style="font-size:10px">03a93b…78dda9</span></span><span class="row"><span class="cap sp" style="--v:43%"></span><span class="mono" style="width:64px;text-align:right">182.00</span></span><span class="r mono">307</span><span class="r mono">211</span><span class="r mono">#8</span><span class="r down mono">▼3</span></div>
+            </div>
+            <div class="row muted" style="margin-top:12px"><span>1–30 of 412</span><span class="sp"></span><span>← Prev</span><span style="margin-left:14px">Next →</span></div>
+          </div>
+          <b class="n" style="left:304px;top:120px">1</b>
+          <b class="n" style="left:300px;top:226px">2</b>
+          <b class="n" style="right:40px;top:120px">3</b>
+          <b class="n" style="right:40px;top:196px">4</b>
+        </div>
+        <ol class="notes">
+          <li><b>Filter chips</b> replace the Field / Relation / Value / Match / Apply form. "+ Add filter" opens a small popover, results update live, and every chip is reflected in the URL.</li>
+          <li><b>Capacity bars</b> make the column scannable. The pubkey drops to a quiet second line instead of a loud dark pill.</li>
+          <li><b>Six default columns.</b> The other five (closeness, eigenvector, weighted variants, base fee, protocols) move to "Columns ▾".</li>
+          <li><b>Links are ink, not mint.</b> The whole row is clickable, and colour is kept for deltas and selection.</li>
+        </ol>
+      </div>
+    </article>
+
+    <!-- B4 -->
+    <article class="screen">
+      <h3>Mobile and the channel page</h3>
+      <div class="row">
+        <div class="wf mobile">
+          <div class="abs row" style="top:40px;left:18px;right:18px"><b class="serif" style="font-size:17px">bolt.observer</b><span class="sp"></span><span>☰</span></div>
+          <div class="abs" style="top:82px;left:18px;right:18px">
+            <div class="row" style="height:42px;padding:0 12px;background:var(--surface);border:1px solid var(--text);border-radius:10px"><span class="muted">Node, channel or key</span></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;margin-top:18px;border-top:1px solid var(--line)">
+              <div style="padding:10px 0;border-bottom:1px solid var(--line)"><div class="lbl">Nodes</div><div class="mono" style="font-size:17px">5,110</div></div>
+              <div style="padding:10px 0;border-bottom:1px solid var(--line)"><div class="lbl">Channels</div><div class="mono" style="font-size:17px">26,654</div></div>
+              <div style="padding:10px 0;border-bottom:1px solid var(--line)"><div class="lbl">Capacity</div><div class="mono" style="font-size:17px">3,795 BTC</div></div>
+              <div style="padding:10px 0;border-bottom:1px solid var(--line)"><div class="lbl">Median fee</div><div class="mono" style="font-size:17px">170 ppm</div></div>
+            </div>
+            <div class="serif" style="font-size:16px;margin-top:20px">Channel</div>
+            <div style="margin-top:10px;border:1px solid var(--line);border-radius:10px;padding:14px;background:var(--surface)">
+              <div class="row"><b>bfx-lnd0</b><span class="sp"></span><b>ACINQ</b></div>
+              <div class="row" style="margin:10px 0 4px"><span class="dot" style="background:var(--ink2)"></span><span class="sp" style="height:1px;background:var(--text)"></span><span>→</span><span class="dot" style="background:var(--ink2)"></span></div>
+              <div class="row lbl"><span>1 ppm · base 1 sat</span><span class="sp"></span><span>CLTV 80</span></div>
+              <div class="row" style="margin:10px 0 4px"><span class="dot" style="background:var(--ink2)"></span><span>←</span><span class="sp" style="height:1px;background:var(--text)"></span><span class="dot" style="background:var(--ink2)"></span></div>
+              <div class="row lbl"><span>CLTV 144</span><span class="sp"></span><span>2,499 ppm · base 1 sat</span></div>
+              <div class="row" style="margin-top:12px"><span class="mono muted" style="font-size:10.5px">811984x2037x0</span><span class="sp"></span><span class="mono">5.00 BTC</span></div>
+            </div>
+          </div>
+          <b class="n" style="right:12px;top:90px">1</b>
+          <b class="n" style="right:12px;top:330px">2</b>
+        </div>
+        <ol class="notes">
+          <li><b>Single-line header.</b> Search sits directly below it, and the stats grid reflows to 2×2. Tables turn into stacked rows (name, then value).</li>
+          <li><b>Channels shown by direction.</b> Each fee policy sits on the arrow it applies to, and the title is "A ↔ B" instead of a bare SCID. The same component scales up on desktop.</li>
+        </ol>
+      </div>
+    </article>
+  </section>
+
+  <!-- =============================== C · CONSOLE =============================== -->
+  <section class="dir dir-c" id="c">
+    <div class="intro">
+      <div>
+        <h2>C · Console</h2>
+        <p class="pitch">A precise tool for routing-node operators and analysts. A sidebar holds the app shell, ⌘K reaches everything, and list views are master–detail so you can scan many nodes with j/k without losing your place.</p>
+        <dl>
+          <dt>Best if</dt><dd>Your core audience is node operators comparing peers, fees and centrality. Repeat visits matter more than first impressions.</dd>
+          <dt>Strength</dt><dd>Highest information density without clutter. Keyboard-driven. Familiar to anyone who uses Linear, Vercel or Grafana. Room to grow (watchlists, alerts) if accounts ever appear.</dd>
+          <dt>Tradeoff</dt><dd>It looks like many SaaS dashboards, so it's less distinctive. Mobile needs a separate layout. It can be intimidating for casual visitors.</dd>
+        </dl>
+      </div>
+      <div class="mood" style="background:#09090b;color:#ececef">
+        <div class="type-a" style="font-family:'Geist';font-weight:500;letter-spacing:-.03em">ACINQ <span style="font-family:'Geist Mono';font-size:22px;color:#1dfebb">363.25 BTC</span></div>
+        <div class="type-b" style="font-family:'Geist'">Geist + Geist Mono · zinc neutrals, existing brand mint kept as the only accent</div>
+        <div class="sw"><i style="background:#09090b"></i><i style="background:#111114"></i><i style="background:#222227"></i><i style="background:#74747d"></i><i style="background:#ececef"></i><i style="background:#1dfebb"></i><i style="background:#ff7a7a"></i></div>
+        <div class="meta">dark default + light variant · 6px radius · 1px hairlines · dense 32px rows</div>
+      </div>
+    </div>
+
+    <!-- C1 -->
+    <article class="screen">
+      <h3>Overview dashboard</h3>
+      <div class="row">
+        <div class="wf">
+          <nav class="abs col" style="left:0;top:0;bottom:0;width:184px;border-right:1px solid var(--line);padding:16px 12px;gap:2px">
+            <div class="row" style="gap:8px;font-weight:600;padding:0 8px 16px"><span class="dot"></span>bolt.observer</div>
+            <div class="row" style="padding:7px 8px;border-radius:6px;background:var(--ink)"><span class="sw" style="background:var(--accent)"></span>Overview</div>
+            <div class="row muted" style="padding:7px 8px"><span class="sw"></span>Graph</div>
+            <div class="row muted" style="padding:7px 8px"><span class="sw"></span>Nodes</div>
+            <div class="row muted" style="padding:7px 8px"><span class="sw"></span>Channels</div>
+            <div class="row muted" style="padding:7px 8px"><span class="sw"></span>Rankings</div>
+            <div class="row muted" style="padding:7px 8px"><span class="sw"></span>Fees</div>
+            <span class="sp"></span>
+            <div class="col lbl" style="padding:0 8px;gap:3px"><span class="row"><span class="dot" style="width:6px;height:6px"></span>Synced 2h ago</span><span>next in 58m · gossip snapshot</span></div>
+          </nav>
+          <div class="abs row" style="left:184px;right:0;top:0;height:52px;padding:0 20px;border-bottom:1px solid var(--line)">
+            <span class="muted">Network /</span><span>Overview</span>
+            <div class="row" style="margin-left:40px;width:300px;height:30px;padding:0 10px;border:1px solid var(--line);border-radius:7px"><span class="muted">Search or jump to…</span><span class="sp"></span><span class="kbd">⌘K</span></div>
+            <span class="sp"></span><div class="seg"><span>7d</span><span class="on">30d</span><span>1y</span><span>All</span></div>
+          </div>
+          <div class="abs" style="left:204px;right:20px;top:70px">
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+              <div class="surface" style="padding:12px 14px"><div class="lbl">Nodes</div><div class="row"><span class="num">5,110</span><span class="sp"></span><span class="lbl up">+1.2%</span></div><svg class="chart" data-kind="spark" data-seed="2" style="width:100%;height:20px;margin-top:6px"></svg></div>
+              <div class="surface" style="padding:12px 14px"><div class="lbl">Channels</div><div class="row"><span class="num">26,654</span><span class="sp"></span><span class="lbl down">−0.4%</span></div><svg class="chart" data-kind="spark" data-seed="6" style="width:100%;height:20px;margin-top:6px"></svg></div>
+              <div class="surface" style="padding:12px 14px"><div class="lbl">Capacity</div><div class="row"><span class="num">3,795 <span style="font-size:12px" class="muted">BTC</span></span><span class="sp"></span><span class="lbl up">+0.8%</span></div><svg class="chart" data-kind="spark" data-seed="8" style="width:100%;height:20px;margin-top:6px"></svg></div>
+              <div class="surface" style="padding:12px 14px"><div class="lbl">Median fee</div><div class="row"><span class="num">170 <span style="font-size:12px" class="muted">ppm</span></span><span class="sp"></span><span class="lbl muted">±0</span></div><svg class="chart" data-kind="spark" data-seed="13" style="width:100%;height:20px;margin-top:6px"></svg></div>
+            </div>
+            <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-top:12px">
+              <div class="surface" style="padding:12px 14px"><div class="row"><b>Capacity</b><span class="muted">ⓘ</span><span class="sp"></span><div class="seg"><span class="on">BTC</span><span>USD</span></div></div><svg class="chart" data-kind="line" data-series="2" data-seed="21" style="width:100%;height:150px;margin-top:8px"></svg></div>
+              <div class="surface" style="padding:12px 14px"><div class="row"><b>Opens vs closes</b></div><svg class="chart" data-kind="pm" data-seed="3" style="width:100%;height:150px;margin-top:8px"></svg></div>
+            </div>
+            <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-top:12px">
+              <div class="surface" style="padding:4px 0">
+                <div class="tbl" style="--cols:.3fr 1.6fr 1fr .8fr .8fr;--rh:28px">
+                  <div class="h"><span>#</span><span>Top movers · capacity</span><span class="r">Value</span><span class="r">Δ 30d</span><span class="r">Trend</span></div>
+                  <div><span class="muted">1</span><span>cyberdyne.sh</span><span class="r mono">182.00</span><span class="r mono up">▲ 6</span><span class="r"><svg class="chart" data-kind="spark" data-seed="31" style="width:60px;height:14px;margin-left:auto"></svg></span></div>
+                  <div><span class="muted">2</span><span>Megalithic.me</span><span class="r mono">90.38</span><span class="r mono up">▲ 4</span><span class="r"><svg class="chart" data-kind="spark" data-seed="32" style="width:60px;height:14px;margin-left:auto"></svg></span></div>
+                </div>
+              </div>
+              <div class="surface" style="padding:12px 14px"><b>Fee distribution</b><svg class="chart" data-kind="hist" data-seed="12" style="width:100%;height:50px;margin-top:6px"></svg></div>
+            </div>
+          </div>
+          <b class="n" style="left:150px;top:96px">1</b>
+          <b class="n" style="left:520px;top:16px">2</b>
+          <b class="n" style="right:6px;top:16px">3</b>
+          <b class="n" style="left:196px;top:136px">4</b>
+        </div>
+        <ol class="notes">
+          <li><b>Persistent sidebar.</b> Room for 6+ sections (Channels and Fees get first-class pages). The sync status lives in the sidebar footer, written for people.</li>
+          <li><b>⌘K command palette</b> for search plus navigation: "go to rankings", "copy pubkey", "route from…".</li>
+          <li><b>One global time range</b> drives every widget, instead of a 1y/3y/all control on each chart.</li>
+          <li><b>KPI cards with deltas and sparklines.</b> Cards are flat (hairline, no shadow) and don't nest.</li>
+        </ol>
+      </div>
+    </article>
+
+    <!-- C2 -->
+    <article class="screen">
+      <h3>Nodes: master–detail</h3>
+      <div class="row">
+        <div class="wf">
+          <nav class="abs col" style="left:0;top:0;bottom:0;width:52px;border-right:1px solid var(--line);padding:16px 0;gap:14px;align-items:center">
+            <span class="dot"></span><span class="sw"></span><span class="sw"></span><span class="sw" style="background:var(--accent)"></span><span class="sw"></span><span class="sw"></span><span class="sw"></span>
+          </nav>
+          <div class="abs" style="left:52px;top:0;bottom:0;width:380px;border-right:1px solid var(--line)">
+            <div class="row" style="height:52px;padding:0 14px;border-bottom:1px solid var(--line)"><b>Nodes</b><span class="muted mono">5,110</span><span class="sp"></span><span class="kbd">⌘K</span></div>
+            <div class="row" style="padding:10px 14px;flex-wrap:wrap;gap:6px"><span class="chip on">Channels &gt; 100 ✕</span><span class="chip dash">+ Filter</span><span class="sp"></span><span class="chip">Capacity ▾</span></div>
+            <div class="tbl" style="--cols:1.4fr 1fr .5fr;--rh:32px">
+              <div><span>bfx-lnd0</span><span class="cap acc" style="--v:100%"></span><span class="r mono">425.3</span></div>
+              <div><span>Binance</span><span class="cap" style="--v:86%"></span><span class="r mono">368.1</span></div>
+              <div class="sel"><span>ACINQ</span><span class="cap" style="--v:85%"></span><span class="r mono">363.3</span></div>
+              <div><span>bfx-lnd1</span><span class="cap" style="--v:65%"></span><span class="r mono">277.5</span></div>
+              <div><span>block-iad-1</span><span class="cap" style="--v:62%"></span><span class="r mono">264.5</span></div>
+              <div><span>LNBiG [Hub-2]</span><span class="cap" style="--v:60%"></span><span class="r mono">254.9</span></div>
+              <div><span>LNBiG [Hub-1]</span><span class="cap" style="--v:49%"></span><span class="r mono">207.1</span></div>
+              <div><span>fixedfloat.com</span><span class="cap" style="--v:43%"></span><span class="r mono">183.3</span></div>
+              <div><span>cyberdyne.sh</span><span class="cap" style="--v:43%"></span><span class="r mono">182.0</span></div>
+              <div><span>okx</span><span class="cap" style="--v:42%"></span><span class="r mono">177.9</span></div>
+              <div><span>LNBiG [Hub-3]</span><span class="cap" style="--v:36%"></span><span class="r mono">154.9</span></div>
+              <div><span>Strike</span><span class="cap" style="--v:32%"></span><span class="r mono">137.4</span></div>
+              <div><span>LOOP</span><span class="cap" style="--v:26%"></span><span class="r mono">110.2</span></div>
+            </div>
+            <div class="abs row lbl" style="left:14px;right:14px;bottom:12px;gap:10px"><span><span class="kbd">j</span> <span class="kbd">k</span> move</span><span><span class="kbd">↵</span> open</span><span><span class="kbd">/</span> filter</span><span class="sp"></span><span>1–30 ▾</span></div>
+          </div>
+          <div class="abs" style="left:432px;right:0;top:0;bottom:0;padding:0 22px">
+            <div class="row" style="height:52px"><span class="dot"></span><b style="font-size:16px">ACINQ</b><span class="tag">ipv4</span><span class="tag">tor</span><span class="mono muted" style="margin-left:4px">03864e…7a3f8f</span><span class="sp"></span><div class="btn">⧉</div><div class="btn">Graph</div><div class="btn">Route</div><div class="btn">↗</div></div>
+            <div class="tabs"><span class="on">Overview</span><span>Channels 1,900</span><span>Fees</span><span>Ranks</span><span>History</span></div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-top:14px">
+              <div style="background:var(--bg);padding:10px 12px"><div class="lbl">Capacity</div><div class="mono" style="font-size:16px">363.25 BTC</div></div>
+              <div style="background:var(--bg);padding:10px 12px"><div class="lbl">Channels</div><div class="mono" style="font-size:16px">1,900</div></div>
+              <div style="background:var(--bg);padding:10px 12px"><div class="lbl">Median out fee</div><div class="mono" style="font-size:16px">499 ppm</div></div>
+              <div style="background:var(--bg);padding:10px 12px"><div class="lbl">Betweenness</div><div class="mono" style="font-size:16px">#1</div></div>
+              <div style="background:var(--bg);padding:10px 12px"><div class="lbl">Closeness</div><div class="mono" style="font-size:16px">#1</div></div>
+              <div style="background:var(--bg);padding:10px 12px"><div class="lbl">Eigenvector</div><div class="mono" style="font-size:16px">#1</div></div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">
+              <div class="surface" style="height:250px;position:relative;overflow:hidden"><svg class="gph abs" style="inset:0" data-seed="5" data-n="140" data-ego data-w="230" data-h="250"></svg><span class="abs lbl" style="left:10px;top:8px">Neighbourhood</span></div>
+              <div class="col" style="gap:8px"><div class="lbl">Largest peers</div>
+                <div class="row"><span style="width:84px">bfx-lnd0</span><span class="cap acc sp" style="--v:92%"></span><span class="mono muted">42.1</span></div>
+                <div class="row"><span style="width:84px">bfx-lnd1</span><span class="cap sp" style="--v:70%"></span><span class="mono muted">31.0</span></div>
+                <div class="row"><span style="width:84px">fixedfloat</span><span class="cap sp" style="--v:40%"></span><span class="mono muted">17.6</span></div>
+                <div class="row"><span style="width:84px">okx</span><span class="cap sp" style="--v:28%"></span><span class="mono muted">12.4</span></div>
+                <div class="lbl" style="margin-top:10px">Fee policy spread</div><svg class="chart" data-kind="hist" data-seed="17" style="width:100%;height:60px"></svg>
+              </div>
+            </div>
+          </div>
+          <b class="n" style="left:300px;top:58px">1</b>
+          <b class="n" style="left:150px;top:164px">2</b>
+          <b class="n" style="left:300px;bottom:10px">3</b>
+          <b class="n" style="right:12px;top:58px">4</b>
+        </div>
+        <ol class="notes">
+          <li><b>Filters stay pinned</b> above the list as chips, just like in direction B.</li>
+          <li><b>Selecting a row fills the right pane</b> without a page load. The URL updates, so it's still shareable. ↗ opens the full page.</li>
+          <li><b>Keyboard-first:</b> j/k to move, ↵ to open, / to filter. Comparing 20 nodes takes seconds instead of 20 page loads.</li>
+          <li><b>Actions live in the header</b> (copy, show in graph, route finder) instead of floating between the header and the table.</li>
+        </ol>
+      </div>
+    </article>
+
+    <!-- C3 -->
+    <article class="screen">
+      <h3>Rankings: movers first</h3>
+      <div class="row">
+        <div class="wf">
+          <nav class="abs col" style="left:0;top:0;bottom:0;width:184px;border-right:1px solid var(--line);padding:16px 12px;gap:2px">
+            <div class="row" style="gap:8px;font-weight:600;padding:0 8px 16px"><span class="dot"></span>bolt.observer</div>
+            <div class="row muted" style="padding:7px 8px"><span class="sw"></span>Overview</div>
+            <div class="row muted" style="padding:7px 8px"><span class="sw"></span>Graph</div>
+            <div class="row muted" style="padding:7px 8px"><span class="sw"></span>Nodes</div>
+            <div class="row muted" style="padding:7px 8px"><span class="sw"></span>Channels</div>
+            <div class="row" style="padding:7px 8px;border-radius:6px;background:var(--ink)"><span class="sw" style="background:var(--accent)"></span>Rankings</div>
+            <div class="row muted" style="padding:7px 8px"><span class="sw"></span>Fees</div>
+          </nav>
+          <div class="abs row" style="left:184px;right:0;top:0;height:52px;padding:0 20px;border-bottom:1px solid var(--line)">
+            <span class="muted">Network /</span><span>Rankings</span><span class="sp"></span>
+            <div class="seg"><span class="on">Capacity</span><span>Channels</span><span>Betweenness</span><span>Closeness</span><span>Eigenvector</span><span>⋯</span></div>
+          </div>
+          <div class="abs" style="left:204px;right:20px;top:70px">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+              <div class="surface" style="padding:12px 14px"><div class="row"><b>Climbers</b><span class="sp"></span><span class="lbl">7d</span></div>
+                <div class="row" style="margin-top:8px"><span>cyberdyne.sh</span><span class="sp"></span><span class="mono up">▲ 6</span></div><div class="row" style="margin-top:4px"><span>Megalithic.me</span><span class="sp"></span><span class="mono up">▲ 4</span></div><div class="row" style="margin-top:4px"><span>LNBiG [Hub-2]</span><span class="sp"></span><span class="mono up">▲ 1</span></div></div>
+              <div class="surface" style="padding:12px 14px"><div class="row"><b>Fallers</b><span class="sp"></span><span class="lbl">7d</span></div>
+                <div class="row" style="margin-top:8px"><span>Kraken</span><span class="sp"></span><span class="mono down">▼ 5</span></div><div class="row" style="margin-top:4px"><span>cyberdyne.sh</span><span class="sp"></span><span class="mono down">▼ 3</span></div><div class="row" style="margin-top:4px"><span>bfx-lnd1</span><span class="sp"></span><span class="mono down">▼ 1</span></div></div>
+              <div class="surface" style="padding:12px 14px"><div class="row"><b>New in top 100</b><span class="sp"></span><span class="lbl">7d</span></div><div class="t" style="--w:70%;margin-top:12px"></div><div class="t" style="--w:55%"></div><div class="t" style="--w:62%"></div></div>
+            </div>
+            <div class="surface" style="margin-top:12px;padding:4px 0">
+              <div class="tbl" style="--cols:.35fr 1.8fr 1fr .5fr .5fr .5fr 1fr;--rh:31px">
+                <div class="h"><span>Rank</span><span>Node</span><span class="r">Capacity</span><span class="r">1d</span><span class="r">7d</span><span class="r">30d</span><span class="r">Rank · 90d</span></div>
+                <div><span class="mono">1</span><span>bfx-lnd0</span><span class="r mono">425.28</span><span class="r mono muted">–</span><span class="r mono up">▲1</span><span class="r mono up">▲2</span><span class="r"><svg class="chart" data-kind="spark" data-seed="41" style="width:90px;height:14px;margin-left:auto"></svg></span></div>
+                <div><span class="mono">2</span><span>Binance</span><span class="r mono">368.08</span><span class="r mono muted">–</span><span class="r mono down">▼1</span><span class="r mono muted">–</span><span class="r"><svg class="chart" data-kind="spark" data-seed="42" style="width:90px;height:14px;margin-left:auto"></svg></span></div>
+                <div><span class="mono">3</span><span>ACINQ</span><span class="r mono">363.25</span><span class="r mono muted">–</span><span class="r mono muted">–</span><span class="r mono up">▲1</span><span class="r"><svg class="chart" data-kind="spark" data-seed="43" style="width:90px;height:14px;margin-left:auto"></svg></span></div>
+                <div><span class="mono">4</span><span>bfx-lnd1</span><span class="r mono">277.54</span><span class="r mono muted">–</span><span class="r mono muted">–</span><span class="r mono down">▼2</span><span class="r"><svg class="chart" data-kind="spark" data-seed="44" style="width:90px;height:14px;margin-left:auto"></svg></span></div>
+                <div><span class="mono">5</span><span>block-iad-1</span><span class="r mono">264.50</span><span class="r mono muted">–</span><span class="r mono muted">–</span><span class="r mono muted">–</span><span class="r"><svg class="chart" data-kind="spark" data-seed="45" style="width:90px;height:14px;margin-left:auto"></svg></span></div>
+                <div><span class="mono">6</span><span>LNBiG [Hub-2]</span><span class="r mono">254.87</span><span class="r mono up">▲1</span><span class="r mono up">▲1</span><span class="r mono up">▲3</span><span class="r"><svg class="chart" data-kind="spark" data-seed="46" style="width:90px;height:14px;margin-left:auto"></svg></span></div>
+                <div><span class="mono">7</span><span>LNBiG [Hub-1]</span><span class="r mono">207.08</span><span class="r mono muted">–</span><span class="r mono muted">–</span><span class="r mono muted">–</span><span class="r"><svg class="chart" data-kind="spark" data-seed="47" style="width:90px;height:14px;margin-left:auto"></svg></span></div>
+              </div>
+            </div>
+          </div>
+          <b class="n" style="left:196px;top:62px">1</b>
+          <b class="n" style="right:6px;top:310px">2</b>
+          <b class="n" style="right:6px;top:16px">3</b>
+        </div>
+        <ol class="notes">
+          <li><b>Movers come first.</b> Climbers, fallers and new entries sit above the fold instead of below 100 rows.</li>
+          <li><b>Deltas are arrows, "–" means unchanged,</b> and a 90-day rank sparkline replaces the empty "90 days" column. Until history exists, those columns hide and one quiet line says "rank history starts on Oct 24".</li>
+          <li><b>Metric switcher in the header,</b> with weighted variants under ⋯ to keep the bar short.</li>
+        </ol>
+      </div>
+    </article>
+
+    <!-- C4 -->
+    <article class="screen">
+      <h3>Mobile: bottom tab bar</h3>
+      <div class="row">
+        <div class="wf mobile">
+          <div class="abs row" style="top:40px;left:16px;right:16px"><span class="dot"></span><b>Overview</b><span class="sp"></span><span class="muted">⌕</span></div>
+          <div class="abs" style="top:78px;left:16px;right:16px">
+            <div class="seg" style="width:100%;display:flex"><span style="flex:1;text-align:center">7d</span><span class="on" style="flex:1;text-align:center">30d</span><span style="flex:1;text-align:center">1y</span><span style="flex:1;text-align:center">All</span></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px">
+              <div class="surface" style="padding:10px"><div class="lbl">Nodes</div><div class="mono" style="font-size:16px">5,110</div><div class="lbl up">+1.2%</div></div>
+              <div class="surface" style="padding:10px"><div class="lbl">Channels</div><div class="mono" style="font-size:16px">26,654</div><div class="lbl down">−0.4%</div></div>
+              <div class="surface" style="padding:10px"><div class="lbl">Capacity</div><div class="mono" style="font-size:16px">3,795</div><div class="lbl up">+0.8%</div></div>
+              <div class="surface" style="padding:10px"><div class="lbl">Median fee</div><div class="mono" style="font-size:16px">170</div><div class="lbl muted">±0</div></div>
+            </div>
+            <div class="surface" style="padding:10px;margin-top:8px"><b>Capacity</b><svg class="chart" data-kind="line" data-series="1" data-seed="21" style="width:100%;height:110px;margin-top:6px"></svg></div>
+            <div class="surface" style="padding:10px;margin-top:8px"><b>Top movers</b><div class="t" style="--w:80%;margin-top:10px"></div><div class="t" style="--w:65%"></div></div>
+          </div>
+          <div class="abs row" style="left:0;right:0;bottom:0;height:64px;border-top:1px solid var(--line);background:var(--surface);justify-content:space-around;padding-bottom:10px">
+            <span class="col" style="align-items:center;gap:3px;font-size:10px"><span class="sw" style="background:var(--accent)"></span>Overview</span>
+            <span class="col muted" style="align-items:center;gap:3px;font-size:10px"><span class="sw"></span>Graph</span>
+            <span class="col muted" style="align-items:center;gap:3px;font-size:10px"><span class="sw"></span>Nodes</span>
+            <span class="col muted" style="align-items:center;gap:3px;font-size:10px"><span class="sw"></span>Ranks</span>
+            <span class="col muted" style="align-items:center;gap:3px;font-size:10px"><span class="sw"></span>More</span>
+          </div>
+          <b class="n" style="right:8px;top:36px">1</b>
+          <b class="n" style="right:8px;bottom:70px">2</b>
+        </div>
+        <ol class="notes">
+          <li><b>Search opens as a full-screen sheet</b> from the ⌕ icon, so the header is one row.</li>
+          <li><b>Bottom tab bar</b> within thumb reach. Master–detail turns into a list, and tapping a row pushes the detail view.</li>
+        </ol>
+      </div>
+    </article>
+  </section>
+
+  <section class="shared">
+    <h2>Shared across every direction</h2>
+    <ol>
+      <li>Global typeahead search (alias, pubkey, SCID, NxNxN). An exact match opens directly.</li>
+      <li>One unit rule: BTC with 2 decimals in the UI, exact sats on hover and copy. Tabular numerals everywhere.</li>
+      <li>Colour has meaning: one accent for selection and interaction, a positive/negative pair for deltas. Links are ink.</li>
+      <li>Methodology and source caveats move to ⓘ popovers and a /methodology page.</li>
+      <li>Empty states collapse to one line. Columns with no data hide.</li>
+      <li>Flat surfaces: hairlines or tonal steps, no drop shadows, no nested cards.</li>
+      <li>Skeleton loaders sized like the final content, so nothing jumps.</li>
+      <li>Graph labels only on hubs and on hover. Add a legend. Selection highlights the neighbourhood.</li>
+      <li>Channel page drawn by direction: A ⇄ B, each policy next to its arrow.</li>
+      <li>Mobile: one-row header, sheet or tab navigation, card rows instead of wide tables.</li>
+    </ol>
+  </section>
+</div>
+
+<script>
+// Deterministic placeholder graphs and charts for the wireframes.
+const NS = "http://www.w3.org/2000/svg";
+function rng(seed) { let s = (seed * 2654435761) >>> 0 || 1; return () => { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; return ((s >>> 0) % 1e6) / 1e6; }; }
+function el(tag, attrs, parent) { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent.appendChild(e); return e; }
+
+function drawGraph(svg) {
+  const W = +svg.dataset.w || 960, H = +svg.dataset.h || 600;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "xMidYMid slice");
+  const r = rng(+svg.dataset.seed || 3), n = +svg.dataset.n || 300;
+  const cx = W * (+svg.dataset.cx || 0.5), cy = H * (+svg.dataset.cy || 0.5);
+  const R = Math.min(W, H) * 0.46;
+  const nodes = [], edges = [];
+  if (svg.hasAttribute("data-ego")) {
+    nodes.push({ x: cx, y: cy, s: 9 });
+    const ring1 = Math.round(n * 0.3);
+    for (let i = 0; i < ring1; i++) {
+      const a = (i / ring1) * Math.PI * 2 + r() * 0.1, d = 0.42 + r() * 0.2;
+      nodes.push({ x: cx + Math.cos(a) * d * W * 0.48, y: cy + Math.sin(a) * d * H * 0.48, s: 2 + r() * 3.5 });
+      edges.push([0, nodes.length - 1, true]);
+    }
+    for (let i = 0; i < n - ring1; i++) {
+      const a = r() * Math.PI * 2, d = 0.72 + r() * 0.45;
+      nodes.push({ x: cx + Math.cos(a) * d * W * 0.48, y: cy + Math.sin(a) * d * H * 0.48, s: 1 + r() * 1.6 });
+      edges.push([1 + Math.floor(r() * ring1), nodes.length - 1, false]);
+    }
+  } else {
+    const hubs = 14;
+    for (let i = 0; i < n; i++) {
+      const a = r() * Math.PI * 2, d = R * (i < hubs ? 0.35 * Math.sqrt(r()) : Math.pow(r(), 0.55));
+      nodes.push({ x: cx + Math.cos(a) * d, y: cy + Math.sin(a) * d, s: i < hubs ? 4.5 + r() * 6 : 1 + r() * 2.2 });
+    }
+    for (let i = 0; i < hubs; i++) for (let j = i + 1; j < hubs; j++) if (r() < 0.5) edges.push([i, j, false]);
+    for (let i = hubs; i < n; i++) {
+      const k = 1 + (r() < 0.35 ? 1 : 0);
+      for (let m = 0; m < k; m++) edges.push([Math.floor(Math.pow(r(), 1.6) * hubs), i, false]);
+    }
+    if (svg.hasAttribute("data-focus")) edges.forEach((e) => { if (e[0] === 0 || e[1] === 0) e[2] = true; });
+  }
+  const focusSet = new Set();
+  edges.forEach(([a, b, f]) => { if (f) { focusSet.add(a); focusSet.add(b); } });
+  const plain = edges.filter((e) => !e[2]).map(([a, b]) => `M${nodes[a].x.toFixed(1)} ${nodes[a].y.toFixed(1)}L${nodes[b].x.toFixed(1)} ${nodes[b].y.toFixed(1)}`).join("");
+  const focus = edges.filter((e) => e[2]).map(([a, b]) => `M${nodes[a].x.toFixed(1)} ${nodes[a].y.toFixed(1)}L${nodes[b].x.toFixed(1)} ${nodes[b].y.toFixed(1)}`).join("");
+  el("path", { d: plain, class: "e" }, svg);
+  if (focus) el("path", { d: focus, class: "ef" }, svg);
+  nodes.forEach((p, i) => {
+    const cls = i === 0 && focusSet.size ? "vf" : focusSet.has(i) ? "vf" : p.s > 4 ? "vh" : "v";
+    el("circle", { cx: p.x.toFixed(1), cy: p.y.toFixed(1), r: (i === 0 && focusSet.size ? Math.max(p.s, 8) : p.s).toFixed(1), class: cls, opacity: focusSet.size && !focusSet.has(i) ? 0.55 : 1 }, svg);
+  });
+  if (focusSet.size) el("circle", { cx: nodes[0].x, cy: nodes[0].y, r: 15, class: "ring" }, svg);
+}
+
+function walk(r, len, drift) { const out = []; let v = 0.2 + r() * 0.2; for (let i = 0; i < len; i++) { v += (r() - 0.5) * 0.08 + drift; v = Math.min(0.95, Math.max(0.05, v)); out.push(v); } return out; }
+
+function drawChart(svg) {
+  const W = 400, H = 100, kind = svg.dataset.kind || "line", r = rng(+svg.dataset.seed || 1);
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  const pts = (vals) => vals.map((v, i) => `${(i / (vals.length - 1)) * W},${H - v * H}`).join(" ");
+  if (kind === "line" || kind === "area") {
+    if (kind === "line") [0.25, 0.5, 0.75].forEach((g) => el("line", { x1: 0, x2: W, y1: H * g, y2: H * g, class: "grid" }, svg));
+    const series = +svg.dataset.series || 1;
+    const main = walk(r, 80, 0.008);
+    if (kind === "area") el("polygon", { points: `0,${H} ${pts(main)} ${W},${H}`, class: "ar" }, svg);
+    el("polyline", { points: pts(main), class: "ln" }, svg);
+    if (series > 1) el("polyline", { points: pts(main.map((v, i) => Math.max(0.03, v * 0.7 + Math.sin(i / 6) * 0.03))), class: "ln3" }, svg);
+  } else if (kind === "spark") {
+    el("polyline", { points: pts(walk(r, 30, 0.006)), class: "ln" }, svg);
+  } else if (kind === "hist") {
+    const k = 28, w = W / k;
+    for (let i = 0; i < k; i++) {
+      const x = i / k, v = Math.exp(-Math.pow((Math.log(x + 0.06) + 1.6) / 0.7, 2)) * (0.85 + r() * 0.15);
+      el("rect", { x: i * w + 1, y: H - v * H, width: w - 2, height: v * H, class: i === 9 ? "bar acc" : "bar" }, svg);
+    }
+  } else if (kind === "pm") {
+    const k = 30, w = W / k;
+    el("line", { x1: 0, x2: W, y1: H / 2, y2: H / 2, class: "grid" }, svg);
+    for (let i = 0; i < k; i++) {
+      const up = 0.15 + r() * 0.3, dn = 0.1 + r() * 0.25;
+      el("rect", { x: i * w + 1, y: H / 2 - up * H / 2, width: w - 2, height: up * H / 2, class: "bar acc" }, svg);
+      el("rect", { x: i * w + 1, y: H / 2, width: w - 2, height: dn * H / 2, class: "bar neg" }, svg);
+    }
+  }
+}
+
+document.querySelectorAll("svg.gph").forEach(drawGraph);
+document.querySelectorAll("svg.chart").forEach(drawChart);
+
+// Direction tabs (also honours #a / #b / #c).
+const tabs = document.querySelectorAll(".dir-tabs button");
+function show(id) {
+  tabs.forEach((t) => t.setAttribute("aria-selected", String(t.dataset.dir === id)));
+  document.querySelectorAll(".dir").forEach((d) => d.classList.toggle("on", d.id === id));
+  history.replaceState(null, "", "#" + id);
+}
+tabs.forEach((t) => t.addEventListener("click", () => show(t.dataset.dir)));
+if (/^#[abc]$/.test(location.hash)) show(location.hash.slice(1));
+</script>
+</body>
+</html>

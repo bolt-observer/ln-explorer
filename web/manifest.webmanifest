@@ -4,8 +4,8 @@
   "description": "Public Lightning Network explorer: live gossip graph, node and channel pages, search, and network stats.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#121212",
-  "theme_color": "#121212",
+  "background_color": "#070908",
+  "theme_color": "#070908",
   "icons": [
     { "src": "/favicon.png", "sizes": "32x32", "type": "image/png" },
     { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }

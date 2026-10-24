@@ -1,0 +1,75 @@
+/* Route explorer: Atlas surfaces, precise numbers, a local channel map. */
+.rt-page { min-height: 100dvh; padding: 104px var(--gutter) 56px; }
+.rt-wrap { width: 100%; max-width: 1400px; margin: 0 auto; }
+.rt-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+.rt-eyebrow { color: var(--accent); font-size: 10.5px; letter-spacing: 0.12em; margin-bottom: 10px; }
+.rt-header h1 { font-size: clamp(28px, 4vw, 38px); font-weight: 500; line-height: 1.2; letter-spacing: -0.035em; margin-bottom: 10px; }
+.rt-header > .btn { flex: none; }
+.rt-search { position: relative; z-index: 3; }
+.rt-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 150px auto; align-items: end; gap: 14px; }
+.rt-form .field { min-width: 0; }
+.rt-form .input { font-size: 12px; }
+.rt-query-help { max-width: 960px; font-size: 12px; margin-top: 14px; line-height: 1.65; }
+.rt-caveat { margin: 12px 2px 24px; font-size: 12px; }
+.rt-map { padding-bottom: 16px; }
+.rt-map .panel-h { margin-bottom: 4px; }
+.rt-endpoints { font-size: 12px; overflow-wrap: anywhere; }
+.rt-endpoints > span { margin: 0 7px; }
+.rt-graph { margin: 14px -22px 12px; border-block: 1px solid var(--line); background: var(--bg); }
+#route-sigma { position: relative; width: 100%; height: clamp(260px, 34vw, 390px); }
+.rt-graph-fallback { padding: 40px 24px; text-align: center; }
+.rt-legend { display: flex; flex-wrap: wrap; gap: 10px 22px; margin-bottom: 8px; font-size: 11.5px; }
+.rt-legend > span { display: inline-flex; align-items: center; gap: 7px; }
+.rt-legend-line { width: 18px; height: 3px; border-radius: 2px; background: var(--accent); }
+.rt-legend-line.alternate { background: var(--muted); height: 2px; }
+.rt-legend-node { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
+.rt-result-count { margin: 18px 2px 12px; font-size: 12px; }
+.rt-timeout { margin-bottom: 16px; }
+.rt-card { padding: 0; margin-top: 16px; overflow: hidden; }
+.rt-card-head { justify-content: flex-start; padding: 18px 22px 0; margin-bottom: 0; }
+.rt-card-head h2 { font-size: 16px; }
+.rt-card-head h2 .mono { margin-left: 4px; }
+.rt-metrics { display: grid; grid-template-columns: 1.1fr 0.5fr 0.8fr 1.2fr 1.6fr; gap: 22px; margin: 0; padding: 22px; }
+.rt-metrics > div { min-width: 0; }
+.rt-metrics dt { font-size: 11.5px; color: var(--muted); margin-bottom: 8px; }
+.rt-metrics dd { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+.rt-metrics dd.sub { font-size: 11px; margin-top: 3px; }
+.rt-metrics .rt-fee { color: var(--accent); font-size: 20px; line-height: 1.2; }
+.rt-metrics .rt-htlc { font-size: 12px; line-height: 1.65; }
+.rt-table-scroll { width: 100%; overflow-x: auto; overscroll-behavior-x: contain; border-top: 1px solid var(--line); }
+.rt-hops th { position: static; }
+.rt-hops th:first-child, .rt-hops td:first-child { padding-left: 22px; }
+.rt-hops th:last-child, .rt-hops td:last-child { padding-right: 22px; }
+.rt-hops td { padding-top: 10px; padding-bottom: 10px; }
+.rt-hops .rt-hop { min-width: 240px; max-width: 440px; white-space: normal; overflow-wrap: anywhere; }
+.rt-hops a:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.rt-sender { display: block; font: 11px var(--sans); }
+.rt-card-note { padding: 14px 22px 18px; font-size: 11.5px; line-height: 1.65; border-top: 1px solid var(--line); }
+.rt-empty { display: grid; gap: 12px; }
+.rt-empty h2 { font-size: 18px; font-weight: 500; }
+.rt-empty .rt-timeout { margin: 0; }
+
+@media (max-width: 1000px) {
+  .rt-form { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .rt-form > .btn { justify-self: start; }
+  .rt-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+  .rt-metrics > div:last-child { grid-column: span 2; }
+}
+
+@media (max-width: 600px) {
+  .rt-page { padding-top: 90px; }
+  .rt-header { align-items: flex-start; flex-direction: column; gap: 12px; margin-bottom: 20px; }
+  .rt-header > .btn { height: 30px; padding-left: 0; }
+  .rt-search, .rt-map, .rt-empty { padding: 16px; }
+  .rt-form { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .rt-form > .btn { width: 100%; margin-top: 2px; }
+  .rt-form .ac-list { min-width: 0; }
+  .rt-graph { margin-left: -16px; margin-right: -16px; }
+  .rt-card-head { padding: 16px 16px 0; flex-wrap: wrap; }
+  .rt-metrics { padding: 18px 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+  .rt-metrics dd { font-size: 13px; }
+  .rt-metrics .rt-fee { font-size: 18px; }
+  .rt-card-note { padding: 12px 16px 16px; }
+  .rt-hops th:first-child, .rt-hops td:first-child { padding-left: 16px; }
+  .rt-hops th:last-child, .rt-hops td:last-child { padding-right: 16px; }
+}

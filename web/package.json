@@ -2,7 +2,7 @@
   "name": "bolt-observer-explorer-web",
   "private": true,
   "scripts": {
-    "build": "esbuild src/main.js --bundle --outfile=static/app.js --format=iife --minify --target=es2020"
+    "build": "esbuild src/app.js src/app.css --bundle --outdir=static --minify --target=es2020,chrome100,safari15,firefox100 --external:/fonts/* --log-level=warning"
   },
   "dependencies": {
     "graphology": "^0.26.0",

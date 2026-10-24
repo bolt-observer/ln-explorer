@@ -253,20 +253,48 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
             limit = 400
         # The full slice is about 3 MB. Keep the default, and any request, on the hub core.
         limit = max(50, min(limit, 800))
-        raw_min = request.args.get("min_channels")
+        raw_min = (request.args.get("min_channels") or "").strip()
         min_channels = None
-        if raw_min not in (None, "", "auto"):
+        if raw_min not in ("", "auto"):
             try:
                 min_channels = max(1, int(raw_min))
             except ValueError:
                 min_channels = None
-        return jsonify(store.graph_slice(limit=limit, min_channels=min_channels))
+        network = (request.args.get("network") or "").strip()
+        ip = (request.args.get("ip") or "").strip()
+        feature = (request.args.get("feature") or "").strip()
+        network = None if network in ("", "all") else network
+        ip = None if ip in ("", "all") else ip
+        feature = None if feature in ("", "all") else feature
+        if network is not None and network not in {"clearnet", "tor", "hybrid"}:
+            return jsonify({"error": "unknown network filter"}), 400
+        if ip is not None and ip not in {"ipv4", "ipv6"}:
+            return jsonify({"error": "unknown IP filter"}), 400
+        if feature is not None and feature not in FILTER_NAMES:
+            return jsonify({"error": "unknown feature filter"}), 400
+        raw_capacity = (request.args.get("min_capacity") or "").strip()
+        min_capacity = None
+        if raw_capacity:
+            try:
+                min_capacity = int(raw_capacity)
+            except ValueError:
+                return jsonify({"error": "min_capacity must be a nonnegative integer"}), 400
+            if min_capacity < 0:
+                return jsonify({"error": "min_capacity must be a nonnegative integer"}), 400
+        return jsonify(store.graph_slice(
+            limit=limit,
+            min_channels=min_channels,
+            network=network,
+            ip=ip,
+            min_capacity=min_capacity,
+            feature=feature,
+        ))
 
     @app.get("/api/nodes")
     def nodes():
         page, page_size = _page_args()
         sort = request.args.get("sort", "total_capacity")
-        if sort not in SORT_FIELDS:
+        if sort not in SORT_FIELDS and sort != "shortest_path":
             sort = "total_capacity"
         direction = request.args.get("dir", "desc")
         if direction not in {"asc", "desc"}:
@@ -378,6 +406,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
         # Current BTC prices for the fiat column; null when unknown.
         result["price"] = store.price_block()
         return jsonify(result)
+
+    @app.get("/api/nodes/<pubkey>/summary")
+    def node_summary(pubkey: str):
+        pubkey = pubkey.lower()
+        if not PUBKEY_RE.match(pubkey) or pubkey not in store.nodes:
+            return jsonify({"error": "node not found"}), 404
+        return jsonify(store.node_summary(pubkey, _bounded_int("peers", 8, 1, 50)))
 
     @app.get("/api/nodes/<pubkey>/events")
     def node_events(pubkey: str):

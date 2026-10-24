@@ -7,6 +7,7 @@ mempool survive a gossip refresh that does not itself carry those fields.
 
 from __future__ import annotations
 
+import bisect
 import json
 import logging
 import math
@@ -23,6 +24,14 @@ from explorer.metrics import compute_metrics
 from explorer.rgs import ParsedGraph, Policy, format_scid
 
 logger = logging.getLogger(__name__)
+
+# Upper edges (sats) of the per-node channel capacity histogram. counts[0] holds
+# channels below edges[0], counts[i] those in [edges[i-1], edges[i]), and the
+# final bucket everything at or above edges[-1].
+CAPACITY_BIN_EDGES = (
+    100_000, 250_000, 500_000, 1_000_000, 2_000_000, 5_000_000,
+    10_000_000, 20_000_000, 50_000_000, 100_000_000, 200_000_000, 500_000_000,
+)
 
 # Snapshot aggregate columns added on top of the original seven. Old rows keep
 # their values; the new columns are NULL until the next refresh fills them.
@@ -2529,6 +2538,42 @@ class Store:
             "total_count": total,
         }
 
+    def node_summary(self, pubkey: str, peer_limit: int = 8) -> dict:
+        """Distribution of one node's channels: capacity histogram and peers by total capacity."""
+        counts = [0] * (len(CAPACITY_BIN_EDGES) + 1)
+        unknown = 0
+        peers: dict[str, list[int]] = {}
+        for scid in self.by_node.get(pubkey, []):
+            channel = self.channels[scid]
+            entry = peers.setdefault(channel.other(pubkey), [0, 0])
+            entry[1] += 1
+            if not channel.capacity:
+                unknown += 1
+                continue
+            entry[0] += channel.capacity
+            counts[bisect.bisect_right(CAPACITY_BIN_EDGES, channel.capacity)] += 1
+        ranked = sorted(peers.items(), key=lambda item: (-item[1][0], -item[1][1], item[0]))
+        top = []
+        for peer, (capacity, channels) in ranked[:peer_limit]:
+            node = self.nodes.get(peer)
+            top.append(
+                {
+                    "pubkey": peer,
+                    "alias": node.alias if node else "",
+                    "capacity": capacity,
+                    "channels": channels,
+                }
+            )
+        return {
+            "capacity_histogram": {
+                "edges": list(CAPACITY_BIN_EDGES),
+                "counts": counts,
+                "unknown": unknown,
+            },
+            "peers": top,
+            "peer_count": len(peers),
+        }
+
     def shortest_paths(self, source: str, adjacency: dict[str, list[str]] | None = None) -> dict[str, int]:
         """Hop distance from ``source`` to every reachable node (BFS)."""
         adjacency = self.adjacency() if adjacency is None else adjacency
@@ -2702,7 +2747,7 @@ class Store:
     ) -> dict:
         protocols = protocols or []
         conditions = conditions or []
-        if sort not in SORT_FIELDS:
+        if sort not in SORT_FIELDS and not (sort == "shortest_path" and reference):
             sort = "total_capacity"
         if feature not in features.FILTER_NAMES:
             feature = None
@@ -2813,11 +2858,11 @@ class Store:
         for pubkey, node in self.nodes.items():
             if needle in node.alias.casefold() or needle in pubkey:
                 info = self.derived.get(pubkey) or {}
-                matches.append((info.get("num_channels", 0), pubkey, node.alias))
+                matches.append((info.get("num_channels", 0), pubkey, node.alias, info.get("total_capacity", 0)))
         matches.sort(key=lambda item: (-item[0], item[1]))
         return [
-            {"pubkey": pubkey, "alias": alias, "num_channels": channels}
-            for channels, pubkey, alias in matches[: max(1, min(int(limit), 20))]
+            {"pubkey": pubkey, "alias": alias, "num_channels": channels, "total_capacity": capacity}
+            for channels, pubkey, alias, capacity in matches[: max(1, min(int(limit), 20))]
         ]
 
     def search(self, text: str, limit: int = 20) -> dict:
@@ -2845,17 +2890,53 @@ class Store:
             nodes.sort(key=lambda item: item["num_channels"], reverse=True)
         return {"nodes": nodes[:limit], "channels": channels[:limit]}
 
-    def graph_slice(self, limit: int = 1200, min_channels: int | None = None) -> dict:
-        linked = [
-            pubkey
-            for pubkey, info in self.derived.items()
-            if info["num_channels"] > 0
-        ]
+    def graph_slice(
+        self,
+        limit: int = 1200,
+        min_channels: int | None = None,
+        network: str | None = None,
+        ip: str | None = None,
+        min_capacity: int | None = None,
+        feature: str | None = None,
+    ) -> dict:
+        """The largest `limit` nodes by channel count among those matching the filters.
+
+        network: "clearnet" (clearnet only), "tor" (Tor only) or "hybrid" (both).
+        ip: "ipv4" or "ipv6" (has that address family). min_capacity is in sats.
+        Edges are drawn only between selected nodes.
+        """
+        explicit_min_channels = min_channels
+        linked = []
+        total_nodes = 0
+        for pubkey, info in self.derived.items():
+            if info["num_channels"] <= 0:
+                continue
+            total_nodes += 1
+            if min_channels is not None and info["num_channels"] < min_channels:
+                continue
+            clearnet = info["ipv4"] or info["ipv6"]
+            if network == "clearnet" and (not clearnet or info["tor"]):
+                continue
+            if network == "tor" and (not info["tor"] or clearnet):
+                continue
+            if network == "hybrid" and not (clearnet and info["tor"]):
+                continue
+            if ip and not info[ip]:
+                continue
+            if min_capacity is not None and info["total_capacity"] < min_capacity:
+                continue
+            if feature and not features.has(self.nodes[pubkey].features, feature):
+                continue
+            linked.append(pubkey)
         linked.sort(key=lambda pubkey: self.derived[pubkey]["num_channels"], reverse=True)
         if min_channels is None:
             chosen = 1
             for threshold in (1, 2, 3, 5, 8, 10, 15, 20, 30, 50):
                 count = sum(1 for pubkey in linked if self.derived[pubkey]["num_channels"] >= threshold)
+                # A sparse filtered population can have every node at the same degree.
+                # Keep that population and cap it; never let automatic density hide it all.
+                if not count:
+                    break
                 chosen = threshold
                 if count <= limit:
                     break
@@ -2908,9 +2989,17 @@ class Store:
             "edges": edges,
             "min_channels": min_channels,
             "limit": limit,
+            "filters": {
+                "network": network,
+                "ip": ip,
+                "min_capacity": min_capacity,
+                "min_channels": explicit_min_channels,
+                "feature": feature,
+            },
+            "matched_nodes": len(linked),
             "shown_nodes": len(nodes),
             "shown_edges": len(edges),
-            "total_nodes": len(linked),
+            "total_nodes": total_nodes,
             "total_channels": len(self.channels),
         }
 
