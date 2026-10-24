@@ -80,7 +80,7 @@ A volume only disappears with `docker compose down -v`, `docker volume rm`, or a
 
 ```bash
 docker compose stop explorer
-docker run --rm -v explorer_explorer-data:/data -v ~/backups:/b alpine cp /b/explorer-YYYYMMDDTHHMMSSZ.sqlite /data/explorer.sqlite
+docker run --rm -v explorer_explorer-data:/data -v ~/backups:/b alpine sh -c "cp /b/explorer-YYYYMMDDTHHMMSSZ.sqlite /data/explorer.sqlite && chown 10001:10001 /data/explorer.sqlite"
 docker compose start explorer
 ```
 
