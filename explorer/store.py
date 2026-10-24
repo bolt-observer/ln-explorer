@@ -16,6 +16,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from explorer import features
 from explorer import fees
 from explorer.metrics import compute_metrics
 from explorer.rgs import ParsedGraph, Policy, format_scid
@@ -90,6 +91,7 @@ SORT_FIELDS = {
     "betweenness_rank",
     "betweenness_weighted_rank",
     "closeness_rank",
+    "closeness_weighted_rank",
     "eigenvector_rank",
     "eigenvector_weighted_rank",
 }
@@ -176,6 +178,16 @@ def _mean(values: list[float]) -> float:
     if not values:
         return 0.0
     return float(statistics.fmean(values))
+
+
+def _filtered_mean(values: list[float]) -> float:
+    """Outlier-corrected mean (Tukey far-out fences; small samples pass through).
+
+    A single 2147483647 ppm placeholder policy must not explode a node's
+    average fee. Maxima stay raw; only the averages are filtered.
+    """
+    summary = fees.summarize(values)
+    return summary["mean_filtered"] or 0.0
 
 
 def _downsample(points: list[dict], max_points: int) -> list[dict]:
@@ -278,6 +290,8 @@ class NodeRecord:
     capacity_done: bool = False
     # 0 = progress from the offset-by-one scanner. 2 = bulk page, then stride 10.
     capacity_scan: int = 0
+    # Announced feature bits (BOLT 9), from RGS v2 or mempool profiles.
+    features: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -414,11 +428,13 @@ class Store:
                 betweenness REAL,
                 betweenness_weighted REAL,
                 closeness REAL,
+                closeness_weighted REAL,
                 eigenvector REAL,
                 eigenvector_weighted REAL,
                 betweenness_rank INTEGER,
                 betweenness_weighted_rank INTEGER,
                 closeness_rank INTEGER,
+                closeness_weighted_rank INTEGER,
                 eigenvector_rank INTEGER,
                 eigenvector_weighted_rank INTEGER
             );
@@ -515,6 +531,19 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE nodes ADD COLUMN capacity_scan INTEGER NOT NULL DEFAULT 0"
             )
+        if "features" not in columns:
+            self._conn.execute("ALTER TABLE nodes ADD COLUMN features TEXT")
+        metric_columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(metrics)")
+        }
+        for column, declaration in (
+            ("closeness_weighted", "REAL"),
+            ("closeness_weighted_rank", "INTEGER"),
+        ):
+            if column not in metric_columns:
+                self._conn.execute(
+                    f"ALTER TABLE metrics ADD COLUMN {column} {declaration}"
+                )
         self._import_legacy_history_blob()
         # Rows written before the aggregate columns copied mempool's reported
         # total into total_capacity; that is not our measurement.
@@ -562,6 +591,7 @@ class Store:
                     capacity_page=row["capacity_page"] or 0,
                     capacity_done=bool(row["capacity_done"]),
                     capacity_scan=row["capacity_scan"] or 0,
+                    features=json.loads(row["features"]) if row["features"] else [],
                 )
             self.channels.clear()
             for row in self._conn.execute("SELECT * FROM channels"):
@@ -579,11 +609,13 @@ class Store:
                     "betweenness": row["betweenness"],
                     "betweenness_weighted": row["betweenness_weighted"],
                     "closeness": row["closeness"],
+                    "closeness_weighted": row["closeness_weighted"],
                     "eigenvector": row["eigenvector"],
                     "eigenvector_weighted": row["eigenvector_weighted"],
                     "betweenness_rank": row["betweenness_rank"],
                     "betweenness_weighted_rank": row["betweenness_weighted_rank"],
                     "closeness_rank": row["closeness_rank"],
+                    "closeness_weighted_rank": row["closeness_weighted_rank"],
                     "eigenvector_rank": row["eigenvector_rank"],
                     "eigenvector_weighted_rank": row["eigenvector_weighted_rank"],
                 }
@@ -759,36 +791,45 @@ class Store:
                 active += 1
         return out_base, out_ppm, in_base, in_ppm, caps, active
 
+    def _derived_record(self, pubkey: str) -> dict:
+        """The per-node derived table row, shared by full and single recompute.
+
+        Averages of fee fields drop far-out outliers (Tukey fences) so a
+        single placeholder policy such as 2147483647 ppm cannot dominate;
+        medians and maxima stay raw.
+        """
+        node = self.nodes[pubkey]
+        out_base, out_ppm, in_base, in_ppm, caps, active = self._fee_lists(pubkey)
+        channel_count = len(self.by_node.get(pubkey, []))
+        ipv4, ipv6, tor = _protocols(node.addresses)
+        total, capacity_source = _capacity_choice(caps, node.capacity)
+        return {
+            "num_channels": channel_count,
+            "active_channels": active,
+            "total_capacity": total,
+            "capacity_source": capacity_source,
+            "avg_capacity": _mean(caps),
+            "med_capacity": _median(caps),
+            "max_capacity": max(caps) if caps else 0,
+            "avg_out_base": _filtered_mean(out_base),
+            "med_out_base": _median(out_base),
+            "max_out_base": max(out_base) if out_base else 0,
+            "avg_out_ppm": _filtered_mean(out_ppm),
+            "med_out_ppm": _median(out_ppm),
+            "max_out_ppm": max(out_ppm) if out_ppm else 0,
+            "avg_in_base": _filtered_mean(in_base),
+            "med_in_base": _median(in_base),
+            "avg_in_ppm": _filtered_mean(in_ppm),
+            "med_in_ppm": _median(in_ppm),
+            "ipv4": ipv4,
+            "ipv6": ipv6,
+            "tor": tor,
+        }
+
     def _recompute_derived(self) -> None:
-        derived = {}
-        for pubkey, node in self.nodes.items():
-            out_base, out_ppm, in_base, in_ppm, caps, active = self._fee_lists(pubkey)
-            channel_count = len(self.by_node.get(pubkey, []))
-            ipv4, ipv6, tor = _protocols(node.addresses)
-            total, capacity_source = _capacity_choice(caps, node.capacity)
-            derived[pubkey] = {
-                "num_channels": channel_count,
-                "active_channels": active,
-                "total_capacity": total,
-                "capacity_source": capacity_source,
-                "avg_capacity": _mean(caps),
-                "med_capacity": _median(caps),
-                "max_capacity": max(caps) if caps else 0,
-                "avg_out_base": _mean(out_base),
-                "med_out_base": _median(out_base),
-                "max_out_base": max(out_base) if out_base else 0,
-                "avg_out_ppm": _mean(out_ppm),
-                "med_out_ppm": _median(out_ppm),
-                "max_out_ppm": max(out_ppm) if out_ppm else 0,
-                "avg_in_base": _mean(in_base),
-                "med_in_base": _median(in_base),
-                "avg_in_ppm": _mean(in_ppm),
-                "med_in_ppm": _median(in_ppm),
-                "ipv4": ipv4,
-                "ipv6": ipv6,
-                "tor": tor,
-            }
-        self.derived = derived
+        self.derived = {
+            pubkey: self._derived_record(pubkey) for pubkey in self.nodes
+        }
 
     def install_graph(self, graph: ParsedGraph, source: str, detail: str) -> None:
         """Replace topology, keeping previously learned aliases and capacities.
@@ -821,6 +862,10 @@ class Store:
                 alias = getattr(parsed, "alias", "") or (old.alias if old else "")
                 color = getattr(parsed, "color", "") or (old.color if old else "")
                 addresses = list(parsed.addresses) or (old.addresses if old else [])
+                # RGS v2 carries feature bytes; v1 does not, so keep whatever
+                # the mempool profile enrichment already learned.
+                announced = features.bits_from_bytes(getattr(parsed, "features", b"") or b"")
+                feature_bits = announced or (old.features if old else [])
                 nodes[pubkey] = NodeRecord(
                     pubkey=pubkey,
                     alias=alias,
@@ -834,6 +879,7 @@ class Store:
                     capacity_page=old.capacity_page if old else 0,
                     capacity_done=old.capacity_done if old else False,
                     capacity_scan=old.capacity_scan if old else 0,
+                    features=feature_bits,
                 )
             channels = {
                 scid: ChannelRecord(
@@ -1581,39 +1627,22 @@ class Store:
                 node.first_seen = int(fields["first_seen"])
             if fields.get("capacity"):
                 node.capacity = int(fields["capacity"])
+            if fields.get("features"):
+                # An empty profile answer never wipes bits learned from gossip.
+                bits = [
+                    int(bit)
+                    for bit in fields["features"]
+                    if isinstance(bit, int) and not isinstance(bit, bool) and bit >= 0
+                ]
+                if bits:
+                    node.features = sorted(set(bits))
             if stamp:
                 node.enriched_at = time.time()
             if pubkey in self.derived or pubkey in self.by_node:
                 self._recompute_one(pubkey)
 
     def _recompute_one(self, pubkey: str) -> None:
-        node = self.nodes[pubkey]
-        out_base, out_ppm, in_base, in_ppm, caps, active = self._fee_lists(pubkey)
-        channel_count = len(self.by_node.get(pubkey, []))
-        ipv4, ipv6, tor = _protocols(node.addresses)
-        total, capacity_source = _capacity_choice(caps, node.capacity)
-        self.derived[pubkey] = {
-            "num_channels": channel_count,
-            "active_channels": active,
-            "total_capacity": total,
-            "capacity_source": capacity_source,
-            "avg_capacity": _mean(caps),
-            "med_capacity": _median(caps),
-            "max_capacity": max(caps) if caps else 0,
-            "avg_out_base": _mean(out_base),
-            "med_out_base": _median(out_base),
-            "max_out_base": max(out_base) if out_base else 0,
-            "avg_out_ppm": _mean(out_ppm),
-            "med_out_ppm": _median(out_ppm),
-            "max_out_ppm": max(out_ppm) if out_ppm else 0,
-            "avg_in_base": _mean(in_base),
-            "med_in_base": _median(in_base),
-            "avg_in_ppm": _mean(in_ppm),
-            "med_in_ppm": _median(in_ppm),
-            "ipv4": ipv4,
-            "ipv6": ipv6,
-            "tor": tor,
-        }
+        self.derived[pubkey] = self._derived_record(pubkey)
 
     def set_channel_capacity(self, scid: int, capacity: int, recompute: bool = True) -> None:
         with self._lock:
@@ -2010,8 +2039,8 @@ class Store:
             conn.executemany(
                 """INSERT INTO nodes (
                     pubkey, alias, color, addresses, country, city, first_seen, capacity,
-                    enriched_at, capacity_page, capacity_done, capacity_scan
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    enriched_at, capacity_page, capacity_done, capacity_scan, features
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [
                     (
                         node.pubkey,
@@ -2026,6 +2055,7 @@ class Store:
                         node.capacity_page,
                         1 if node.capacity_done else 0,
                         node.capacity_scan,
+                        json.dumps(node.features) if node.features else None,
                     )
                     for node in self.nodes.values()
                 ],
@@ -2033,21 +2063,24 @@ class Store:
             conn.execute("DELETE FROM metrics")
             conn.executemany(
                 """INSERT INTO metrics (
-                    pubkey, betweenness, betweenness_weighted, closeness, eigenvector,
-                    eigenvector_weighted, betweenness_rank, betweenness_weighted_rank,
-                    closeness_rank, eigenvector_rank, eigenvector_weighted_rank
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    pubkey, betweenness, betweenness_weighted, closeness, closeness_weighted,
+                    eigenvector, eigenvector_weighted, betweenness_rank,
+                    betweenness_weighted_rank, closeness_rank, closeness_weighted_rank,
+                    eigenvector_rank, eigenvector_weighted_rank
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [
                     (
                         pubkey,
                         row.get("betweenness"),
                         row.get("betweenness_weighted"),
                         row.get("closeness"),
+                        row.get("closeness_weighted"),
                         row.get("eigenvector"),
                         row.get("eigenvector_weighted"),
                         row.get("betweenness_rank"),
                         row.get("betweenness_weighted_rank"),
                         row.get("closeness_rank"),
+                        row.get("closeness_weighted_rank"),
                         row.get("eigenvector_rank"),
                         row.get("eigenvector_weighted_rank"),
                     )
@@ -2106,10 +2139,23 @@ class Store:
             "betweenness_rank": metrics.get("betweenness_rank"),
             "betweenness_weighted_rank": metrics.get("betweenness_weighted_rank"),
             "closeness_rank": metrics.get("closeness_rank"),
+            "closeness_weighted_rank": metrics.get("closeness_weighted_rank"),
             "eigenvector_rank": metrics.get("eigenvector_rank"),
             "eigenvector_weighted_rank": metrics.get("eigenvector_weighted_rank"),
             "shortest_path": distance,
             "metrics_ready": self.metrics_meta.get("ready", False),
+            # Feature bits decoded to {bit, name, required}; booleans are None
+            # when this node's features are unknown (v1 gossip, no profile yet).
+            "features": features.describe(node.features) if node.features else [],
+            "wumbo": features.has(node.features, "wumbo") if node.features else None,
+            "anchors": features.has(node.features, "anchors") if node.features else None,
+            "dual_fund": features.has(node.features, "dual_fund") if node.features else None,
+            "onion_messages": (
+                features.has(node.features, "onion_messages") if node.features else None
+            ),
+            "route_blinding": (
+                features.has(node.features, "route_blinding") if node.features else None
+            ),
         }
 
     def channel_view(self, scid: int) -> dict | None:
@@ -2222,11 +2268,14 @@ class Store:
         page_size: int = 30,
         reference: str | None = None,
         reachable_only: bool = False,
+        feature: str | None = None,
     ) -> dict:
         protocols = protocols or []
         conditions = conditions or []
         if sort not in SORT_FIELDS:
             sort = "total_capacity"
+        if feature not in features.FILTER_NAMES:
+            feature = None
         distances = self.shortest_paths(reference) if reference else {}
         words = [word.casefold() for word in text.split() if word.strip()]
         matched = []
@@ -2240,11 +2289,14 @@ class Store:
                     continue
             if protocols and not all(info.get(protocol) for protocol in protocols):
                 continue
+            if feature and not features.has(node.features, feature):
+                continue
             metrics = self.metrics.get(pubkey, {})
             record = {**info, **{k: metrics.get(k) for k in (
                 "betweenness_rank",
                 "betweenness_weighted_rank",
                 "closeness_rank",
+                "closeness_weighted_rank",
                 "eigenvector_rank",
                 "eigenvector_weighted_rank",
             )}}
@@ -2316,6 +2368,25 @@ class Store:
         if quantifier == "none":
             return not any(results)
         return all(results)
+
+    def autocomplete(self, text: str, limit: int = 8) -> list[dict]:
+        """Lightweight node lookup for the reference/search inputs.
+
+        Local store only, no mempool call, at least two characters.
+        """
+        needle = text.strip().casefold()
+        if len(needle) < 2:
+            return []
+        matches = []
+        for pubkey, node in self.nodes.items():
+            if needle in node.alias.casefold() or needle in pubkey:
+                info = self.derived.get(pubkey) or {}
+                matches.append((info.get("num_channels", 0), pubkey, node.alias))
+        matches.sort(key=lambda item: (-item[0], item[1]))
+        return [
+            {"pubkey": pubkey, "alias": alias, "num_channels": channels}
+            for channels, pubkey, alias in matches[: max(1, min(int(limit), 20))]
+        ]
 
     def search(self, text: str, limit: int = 20) -> dict:
         needle = text.strip()
@@ -2413,11 +2484,16 @@ class Store:
 
     def status(self) -> dict:
         named = sum(1 for node in self.nodes.values() if node.alias)
+        linked = [pubkey for pubkey in self.by_node if pubkey in self.nodes]
+        known_features = sum(
+            1 for pubkey in linked if self.nodes[pubkey].features
+        )
         return {
             "ready": bool(self.channels),
             "nodes": len(self.by_node),
             "channels": len(self.channels),
             "named_nodes": named,
+            "features_known": known_features,
             "updated_at": self.updated_at,
             "graph_timestamp": self.graph_timestamp,
             "source": self.source,

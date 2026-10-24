@@ -128,6 +128,48 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(unknown.status_code, 404)
         self.assertEqual(unknown.get_json()["error"], "not found")
 
+    def test_feature_filter_autocomplete_and_node_view_fields(self):
+        self.store.apply_node_enrichment(PUB_A, {"features": [18, 24]})
+        self.store.apply_node_enrichment(PUB_B, {"features": [8]})
+
+        node = self.client.get(f"/api/nodes/{PUB_A}").get_json()
+        self.assertIn("closeness_weighted_rank", node)
+        self.assertIsNotNone(node["closeness_weighted_rank"])
+        self.assertIn("features", node)
+        names = {feature["name"] for feature in node["features"]}
+        self.assertIn("option_support_large_channel", names)
+        self.assertIn("option_route_blinding", names)
+        self.assertTrue(node["wumbo"])
+        self.assertTrue(node["route_blinding"])
+        # Features unknown -> nothing announced, not "no wumbo".
+        unknown = self.client.get(f"/api/nodes/{PUB_C}").get_json()
+        self.assertEqual(unknown["features"], [])
+        self.assertIsNone(unknown["wumbo"])
+        known_without = self.client.get(f"/api/nodes/{PUB_B}").get_json()
+        self.assertFalse(known_without["wumbo"])
+
+        filtered = self.client.get("/api/nodes?feature=wumbo").get_json()
+        self.assertEqual({row["pubkey"] for row in filtered["objects"]}, {PUB_A})
+        invalid = self.client.get("/api/nodes?feature=nonsense")
+        self.assertEqual(invalid.status_code, 400)
+
+        status = self.client.get("/api/status").get_json()
+        self.assertEqual(status["features_known"], 2)
+
+    def test_autocomplete_min_length_and_matches(self):
+        short = self.client.get("/api/autocomplete?q=a")
+        self.assertEqual(short.status_code, 200)
+        self.assertEqual(short.get_json(), [])
+        empty = self.client.get("/api/autocomplete?q=")
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(empty.get_json(), [])
+        matched = self.client.get("/api/autocomplete?q=al&limit=8").get_json()
+        self.assertEqual(matched[0]["pubkey"], PUB_A)
+        self.assertEqual(matched[0]["alias"], "Alpha")
+        self.assertGreater(matched[0]["num_channels"], 0)
+        by_key = self.client.get(f"/api/autocomplete?q={PUB_B[:6]}").get_json()
+        self.assertEqual(by_key[0]["pubkey"], PUB_B)
+
     def test_roundtrip_persistence(self):
         self.store.save()
         restored = Store(self.store.db_path)
