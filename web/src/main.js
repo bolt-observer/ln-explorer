@@ -727,12 +727,16 @@ function readNodesState(params) {
       const tree = JSON.parse(raw);
       if (tree && typeof tree === "object" && Array.isArray(tree.items) && tree.items.length) {
         state.quantifier = tree.op === "or" ? "any" : tree.op === "not" ? "none" : "all";
+        // Keep each row's position in tree.items so chips can remove the
+        // right entry even when the URL carries nested groups.
         state.rows = tree.items
-          .filter((item) => item && typeof item === "object" && item.field !== undefined)
-          .map((item) => ({
+          .map((item, pos) => ({ item, pos }))
+          .filter(({ item }) => item && typeof item === "object" && item.field !== undefined)
+          .map(({ item, pos }) => ({
             field: String(item.field),
             rel: String(item.rel || "gt"),
             value: String(item.value ?? ""),
+            pos,
           }));
         state.nested = tree.items.some(
           (item) => item && typeof item === "object" && Array.isArray(item.items)
@@ -806,7 +810,8 @@ function renderFilterChips(container, state, fields) {
         if (raw) {
           try {
             const tree = JSON.parse(raw);
-            tree.items.splice(Number(index), 1);
+            const row = state.rows[Number(index)];
+            tree.items.splice(row && row.pos !== undefined ? row.pos : Number(index), 1);
             if (tree.items.length) next.set("filter", JSON.stringify(tree));
             else next.delete("filter");
           } catch (error) {
