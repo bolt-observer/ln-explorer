@@ -22,6 +22,8 @@ const EDGE_LIT = premul(29, 254, 187, 0.42);
 const EDGE_HOVER = premul(232, 238, 235, 0.85);
 export const DENSITY_STEPS = [100, 200, 400, 600, 800];
 
+const MODE_KEY = "bolt.map.mode"; // must precede `s`: readMode() runs in its initialiser
+
 const s = {
   container: null,
   // Camera rotation (radians). Kept across renderer rebuilds (filter or density changes).
@@ -44,7 +46,23 @@ const s = {
   lit: new Set(),
   insets: { left: 0, right: 0, top: 0, bottom: 0 },
   loadListeners: new Set(),
+  // 3D mode: a lazily loaded three.js renderer (static/map3d.js) drawn over the sigma
+  // map, which stays alive underneath so 2D state and camera survive a toggle.
+  mode: readMode(),
+  view3d: null,
+  container3d: null,
+  loading3d: null,
+  stateShown: false, // a loading or error overlay is up (setMapState)
 };
+
+function readMode() {
+  try {
+    return localStorage.getItem(MODE_KEY) === "3d" ? "3d" : "2d";
+  } catch {
+    return "2d";
+  }
+}
+const is3d = () => s.mode === "3d" && s.view3d !== null;
 
 // ---------- colour + size ----------
 function mix(a, b, t) {
@@ -256,6 +274,7 @@ function hideTip() {
 }
 
 function viewportOf(node) {
+  if (is3d()) return s.view3d.viewportOf(node);
   if (!s.renderer) return null;
   const data = s.renderer.getNodeDisplayData(node);
   return data ? s.renderer.framedGraphToViewport(data) : null;
@@ -263,7 +282,9 @@ function viewportOf(node) {
 
 // ---------- state rendering ----------
 function setMapState(html) {
-  s.container.style.visibility = html ? "hidden" : "";
+  s.stateShown = Boolean(html);
+  s.container.style.visibility = html || is3d() ? "hidden" : "";
+  if (s.container3d) s.container3d.style.visibility = html || !is3d() ? "hidden" : "";
   let el = s.layer.querySelector(".map-state");
   if (!html) {
     el?.remove();
@@ -278,6 +299,7 @@ function setMapState(html) {
 }
 
 function refresh() {
+  if (is3d()) s.view3d.refreshStyles();
   if (s.renderer) s.renderer.refresh();
   if (s.fallback) s.fallback.draw();
 }
@@ -404,6 +426,100 @@ function wireRotation() {
   });
 }
 
+function stageClick() {
+  const route = currentRoute();
+  const inspecting = (route.parts.length === 0 && route.params.get("node")) || route.parts[0] === "channel";
+  if (inspecting) go(homeUrl());
+}
+
+// ---------- 3D mode ----------
+function load3dBundle() {
+  if (window.__boltMap3d) return Promise.resolve(window.__boltMap3d);
+  s.loading3d ||= new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "/static/map3d.js";
+    script.async = true;
+    script.onload = () => (window.__boltMap3d ? resolve(window.__boltMap3d) : reject(new Error("3D map failed to load")));
+    script.onerror = () => {
+      s.loading3d = null;
+      reject(new Error("3D map failed to load"));
+    };
+    document.head.appendChild(script);
+  });
+  return s.loading3d;
+}
+
+function mapVisible() {
+  return document.body.dataset.mode !== "page";
+}
+
+async function ensure3d() {
+  if (s.view3d) return s.view3d;
+  const lib = await load3dBundle();
+  if (s.view3d) return s.view3d;
+  s.container3d = document.createElement("div");
+  s.container3d.className = "map map3d";
+  s.layer.insertBefore(s.container3d, s.container.nextSibling);
+  s.view3d = lib.create(s.container3d, {
+    nodeStyle: (node) => nodeReducer(node, s.graph.getNodeAttributes(node)),
+    edgeStyle: (edge) => edgeReducer(edge, s.graph.getEdgeAttributes(edge)).color,
+    onHover: (node) => {
+      s.hover = node;
+      if (node) showTipForNode(node);
+      else hideTip();
+      refresh();
+    },
+    onClick: (node) => {
+      hideTip();
+      go(homeUrl({ node }));
+    },
+    onStage: stageClick,
+    // The camera keeps moving while the layout settles: keep the tip on its node.
+    onCamera: () => (s.hover ? showTipForNode(s.hover) : hideTip()),
+  });
+  s.view3d.setInsets(s.insets);
+  window.__explorerMap3dStats = () => s.view3d?.stats(); // for automated checks
+  // Idle the 3D loop on scrolling pages (node profile, route) where the map is hidden.
+  new MutationObserver(() => s.view3d?.setActive(s.mode === "3d" && mapVisible())).observe(document.body, {
+    attributes: true,
+    attributeFilter: ["data-mode"],
+  });
+  return s.view3d;
+}
+
+function applyMode() {
+  const on = is3d();
+  // A loading or error overlay (setMapState) keeps both renderers hidden.
+  s.container.style.visibility = on || s.stateShown ? "hidden" : "";
+  if (s.container3d) s.container3d.style.visibility = on && !s.stateShown ? "" : "hidden";
+  s.view3d?.setActive(on && mapVisible());
+  hideTip();
+  document.body.dataset.map3d = on ? "1" : "";
+}
+
+async function setMode(mode) {
+  s.mode = mode === "3d" ? "3d" : "2d";
+  try {
+    localStorage.setItem(MODE_KEY, s.mode);
+  } catch {
+    // private mode: the choice just isn't remembered
+  }
+  if (s.mode === "3d") {
+    const view = await ensure3d();
+    if (s.mode !== "3d") return applyMode();
+    if (s.graph && view.graph !== s.graph) {
+      view.setGraph(s.graph);
+      view.graph = s.graph;
+    } else if (s.graph) {
+      // Selection may have changed while 3D was inactive (refresh() skips it).
+      view.refreshStyles();
+    }
+    if (s.focus) view.focus(s.focus);
+    else if (s.edge) view.focus(s.edge);
+  }
+  applyMode();
+}
+
 // ---------- renderer lifecycle ----------
 function createRenderer() {
   s.renderer?.kill();
@@ -413,6 +529,7 @@ function createRenderer() {
   s.container.replaceChildren();
   if (!s.graph.order) {
     window.__explorerLayoutDone = true;
+    sync3d(); // an empty result must clear the 3D scene too
     return;
   }
   try {
@@ -454,6 +571,16 @@ function createRenderer() {
     window.__explorerLayout = "canvas";
   }
   window.__explorerLayoutDone = true;
+  sync3d();
+}
+
+/** Hand the current graph to the 3D view (when it exists and 3D is chosen). */
+function sync3d() {
+  if (s.view3d && s.mode === "3d") {
+    s.view3d.setGraph(s.graph);
+    s.view3d.graph = s.graph;
+  }
+  applyMode();
 }
 
 function wireEvents() {
@@ -496,11 +623,7 @@ function wireEvents() {
     hideTip();
     go(mapUrl(`/channel/${s.graph.getEdgeAttribute(edge, "scid")}`));
   });
-  r.on("clickStage", () => {
-    const route = currentRoute();
-    const inspecting = (route.parts.length === 0 && route.params.get("node")) || route.parts[0] === "channel";
-    if (inspecting) go(homeUrl());
-  });
+  r.on("clickStage", stageClick);
   r.getCamera().on("updated", (state) => {
     hideTip();
     // Two-finger touch rotation goes through sigma's touch captor; remember it.
@@ -554,6 +677,13 @@ export const map = {
     s.tip.className = "map-tip glass";
     s.tip.hidden = true;
     document.body.appendChild(s.tip);
+    if (s.mode === "3d") {
+      setMode("3d").catch((error) => {
+        console.warn("3D map unavailable, using 2D", error);
+        s.mode = "2d";
+        applyMode();
+      });
+    }
   },
 
   /** Explicit URL parameters select a graph; omitting them retains the current selection. */
@@ -596,6 +726,7 @@ export const map = {
   setInsets(insets) {
     const wasLeft = s.insets.left > 0;
     s.insets = { left: 0, right: 0, top: 0, bottom: 0, ...insets };
+    s.view3d?.setInsets(s.insets);
     return wasLeft;
   },
 
@@ -611,6 +742,7 @@ export const map = {
     recomputeLit();
     refresh();
     if (s.focus && camera) centerOn([pubkey], { fitNeighbors: true });
+    if (s.focus && camera && is3d()) s.view3d.focus(pubkey);
     return s.focus !== null;
   },
 
@@ -622,6 +754,7 @@ export const map = {
     recomputeLit();
     refresh();
     if (ok && camera) centerOn([a, b]);
+    if (ok && camera && is3d()) s.view3d.focus([a, b]);
     return ok;
   },
 
@@ -636,11 +769,13 @@ export const map = {
 
   reveal(pubkey) {
     if (s.graph?.hasNode(pubkey)) centerOn([pubkey], { duration: 400 });
+    if (s.graph?.hasNode(pubkey) && is3d()) s.view3d.focus(pubkey);
   },
 
   /** Fit the whole network into the area not covered by panels (see setInsets). */
   frame() {
     if (s.graph) centerOn(s.graph.nodes(), { fitSelf: true, duration: 450 });
+    if (s.graph && is3d()) s.view3d.reset();
   },
 
   clear() {
@@ -653,19 +788,32 @@ export const map = {
   },
 
   zoomIn() {
+    if (is3d()) return s.view3d.zoomIn();
     s.renderer?.getCamera().animatedZoom({ duration: 250 });
   },
   zoomOut() {
+    if (is3d()) return s.view3d.zoomOut();
     s.renderer?.getCamera().animatedUnzoom({ duration: 250 });
   },
+  /** "2d" or "3d" (remembered in localStorage). */
+  mode() {
+    return s.mode;
+  },
+  /** 3D needs WebGL; the canvas fallback renderer means it is unavailable. */
+  supports3d() {
+    return !s.fallback;
+  },
+  setMode,
   /** Reset view: no rotation, whole graph framed in the free area. */
   fit() {
+    if (is3d()) return s.view3d.reset();
     if (!s.renderer || !s.graph) return;
     // Unwind to the nearest full turn so the reset takes the short way round.
     s.angle = Math.round(s.renderer.getCamera().getState().angle / TAU) * TAU;
     centerOn(s.graph.nodes(), { fitSelf: true, duration: 450 });
   },
   rotateBy(delta) {
+    if (is3d()) return s.view3d.rotateBy(delta);
     if (s.renderer) rotateTo(s.renderer.getCamera().getState().angle + delta);
   },
   rotateLeft() {

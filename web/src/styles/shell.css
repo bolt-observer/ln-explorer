@@ -102,6 +102,13 @@ body[data-mode="page"] .topbar { position: absolute; }
 .zoom .btn:hover { background: var(--fill-2); color: var(--text); }
 .zoom .hr { margin: 2px 6px; }
 .map.rotating, .map.rotating * { cursor: grabbing !important; }
+.zoom .mode3d { font: 600 11px/1 var(--mono, ui-monospace, monospace); letter-spacing: 0.02em; }
+.zoom .mode3d[aria-pressed="true"] { color: var(--accent); background: var(--fill-2); }
+.map3d { overflow: hidden; }
+.map3d-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+.map3d-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.map3d-label { position: absolute; left: 0; top: 0; white-space: nowrap; font: 500 12px/1 "IBM Plex Sans", system-ui, sans-serif; color: #e8eeeb; text-shadow: 0 0 3px #070908, 0 0 6px #070908; will-change: transform; }
+.map3d-label.pill { font-weight: 600; font-size: 12.5px; color: #02281d; background: var(--accent); border-radius: 7px; padding: 6px 9px; text-shadow: none; }
 body[data-inspector="1"] .zoom { right: calc(var(--gutter) * 2 + var(--inspector-w)); }
 
 .map-tip { position: fixed; z-index: 30; pointer-events: none; border-radius: 10px; padding: 9px 12px; font-size: 12px; white-space: nowrap; animation: fade 0.12s; }
