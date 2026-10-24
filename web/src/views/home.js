@@ -27,11 +27,16 @@ export function mapChrome(el, { inspector = false } = {}) {
     <button type="button" class="btn icon" data-z="in" aria-label="Zoom in">${icon("plus")}</button>
     <button type="button" class="btn icon" data-z="out" aria-label="Zoom out">${icon("minus")}</button>
     <hr class="hr" />
-    <button type="button" class="btn icon" data-z="fit" aria-label="Fit the whole network">${icon("fit")}</button>`;
+    <button type="button" class="btn icon" data-z="rotl" aria-label="Rotate map left" title="Rotate left (or Shift+drag / right-drag)">${icon("rotL")}</button>
+    <button type="button" class="btn icon" data-z="rotr" aria-label="Rotate map right" title="Rotate right (or Shift+drag / right-drag)">${icon("rotR")}</button>
+    <hr class="hr" />
+    <button type="button" class="btn icon" data-z="fit" aria-label="Reset view: no rotation, whole network" title="Reset view">${icon("fit")}</button>`;
   zoom.addEventListener("click", (event) => {
     const which = event.target.closest("[data-z]")?.dataset.z;
     if (which === "in") map.zoomIn();
     if (which === "out") map.zoomOut();
+    if (which === "rotl") map.rotateLeft();
+    if (which === "rotr") map.rotateRight();
     if (which === "fit") map.fit();
   });
   el.appendChild(zoom);

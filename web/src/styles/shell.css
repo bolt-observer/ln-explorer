@@ -101,6 +101,7 @@ body[data-mode="page"] .topbar { position: absolute; }
 .zoom .btn { border: 0; background: transparent; color: var(--text-2); width: 32px; height: 32px; padding: 0; }
 .zoom .btn:hover { background: var(--fill-2); color: var(--text); }
 .zoom .hr { margin: 2px 6px; }
+.map.rotating, .map.rotating * { cursor: grabbing !important; }
 body[data-inspector="1"] .zoom { right: calc(var(--gutter) * 2 + var(--inspector-w)); }
 
 .map-tip { position: fixed; z-index: 30; pointer-events: none; border-radius: 10px; padding: 9px 12px; font-size: 12px; white-space: nowrap; animation: fade 0.12s; }
