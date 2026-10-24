@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -14,13 +15,24 @@ from explorer.features import FILTER_NAMES
 from explorer.refresh import enrich_channel, enrich_node, start_refresh
 from explorer.rgs import parse_scid
 from explorer.sources import Mempool
-from explorer.store import SORT_FIELDS, Store
+from explorer.store import (
+    CHANNEL_SORT_FIELDS,
+    CHANNEL_STATES,
+    FILTER_FIELDS,
+    FILTER_RELATIONS,
+    SORT_FIELDS,
+    FilterError,
+    Store,
+    filter_fields_payload,
+    validate_filter_tree,
+)
 
 logger = logging.getLogger(__name__)
 
 PUBKEY_RE = re.compile(r"^[0-9a-fA-F]{66}$")
 DOMAIN_RE = re.compile(r"^[a-z0-9.-]+$")
 PAGE_ROUTES = {"", "nodes", "stats", "search", "node", "channel", "rankings"}
+PROTOCOLS = frozenset({"ipv4", "ipv6", "tor"})
 
 
 def _bounded_int(name: str, default: int, lowest: int, highest: int) -> int:
@@ -44,19 +56,38 @@ def _page_args() -> tuple[int, int]:
 
 
 def _conditions() -> list[tuple[str, str, float]]:
+    """Parse repeated condition=field|rel|value params, strictly."""
     parsed = []
     for raw in request.args.getlist("condition"):
         parts = raw.split("|")
         if len(parts) != 3:
-            continue
+            raise FilterError(f"condition must be field|relation|value (got {raw!r})")
         field_name, relation, value = parts
-        if relation not in {"gt", "lt", "eq"}:
-            continue
+        if field_name not in FILTER_FIELDS:
+            raise FilterError(f"unknown filter field: {field_name!r}")
+        if relation not in FILTER_RELATIONS:
+            raise FilterError(
+                "unknown relation: "
+                f"{relation!r} (use one of {', '.join(sorted(FILTER_RELATIONS))})"
+            )
         try:
-            parsed.append((field_name, relation, float(value)))
+            number = float(value)
         except ValueError:
-            continue
+            raise FilterError(f"condition value must be a number (got {value!r})")
+        parsed.append((field_name, relation, number))
     return parsed
+
+
+def _filter_tree() -> dict | None:
+    """Parse and validate the optional filter= JSON (nested and/or/not)."""
+    raw = request.args.get("filter", "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise FilterError(f"filter must be valid JSON ({exc.msg})")
+    return validate_filter_tree(parsed)
 
 
 def create_app(settings: Settings | None = None, store: Store | None = None, start_background: bool | None = None) -> Flask:
@@ -234,22 +265,36 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
         reference = (request.args.get("reference") or "").strip().lower()
         if reference and not PUBKEY_RE.match(reference):
             return jsonify({"error": "reference must be a node pubkey"}), 400
-        protocols = [
-            item
-            for item in request.args.get("protocol", "").split(",")
-            if item in {"ipv4", "ipv6", "tor"}
-        ]
+        protocols = []
+        for item in request.args.get("protocol", "").split(","):
+            token = item.strip()
+            if not token:
+                continue
+            if token not in PROTOCOLS:
+                return jsonify(
+                    {"error": f"unknown protocol: {token!r} (use ipv4, ipv6 or tor)"}
+                ), 400
+            if token not in protocols:
+                protocols.append(token)
+        protocol_match = request.args.get("protocol_match", "any")
+        if protocol_match not in {"any", "all"}:
+            return jsonify({"error": "protocol_match must be any or all"}), 400
         quantifier = request.args.get("quantifier", "all")
         if quantifier not in {"all", "any", "none"}:
             quantifier = "all"
         feature = (request.args.get("feature") or "").strip()
         if feature and feature not in FILTER_NAMES:
             return jsonify({"error": "unknown feature filter"}), 400
+        try:
+            conditions = _conditions()
+            condition_filter = _filter_tree()
+        except FilterError as exc:
+            return jsonify({"error": str(exc)}), 400
         result = store.query_nodes(
             text=request.args.get("q", "")[:200],
             protocols=protocols,
             quantifier=quantifier,
-            conditions=_conditions(),
+            conditions=conditions,
             sort=sort,
             direction=direction,
             page=page,
@@ -257,8 +302,15 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
             reference=reference or None,
             reachable_only=request.args.get("reachable") == "1",
             feature=feature or None,
+            condition_filter=condition_filter,
+            protocol_match=protocol_match,
         )
         return jsonify(result)
+
+    @app.get("/api/filter-fields")
+    def filter_fields():
+        """The condition whitelist (labels live here, not in the UI)."""
+        return jsonify(filter_fields_payload())
 
     @app.get("/api/autocomplete")
     def autocomplete():
@@ -289,7 +341,34 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
         if not PUBKEY_RE.match(pubkey) or pubkey not in store.nodes:
             return jsonify({"error": "node not found"}), 404
         page, page_size = _page_args()
-        return jsonify(store.channels_for(pubkey, page, page_size))
+        sort = (request.args.get("sort") or "capacity").strip()
+        if sort not in CHANNEL_SORT_FIELDS:
+            return jsonify(
+                {
+                    "error": "unknown sort field: "
+                    f"{sort!r} (use one of {', '.join(sorted(CHANNEL_SORT_FIELDS))})"
+                }
+            ), 400
+        direction = request.args.get("dir", "desc")
+        if direction not in {"asc", "desc"}:
+            return jsonify({"error": "dir must be asc or desc"}), 400
+        state = (request.args.get("state") or "all").strip()
+        if state not in CHANNEL_STATES:
+            return jsonify(
+                {"error": "state must be one of all, active, disabled"}
+            ), 400
+        result = store.channels_for(
+            pubkey,
+            page,
+            page_size,
+            sort=sort,
+            direction=direction,
+            q=request.args.get("q", "")[:200],
+            state=state,
+        )
+        # Current BTC prices for the fiat column; null when unknown.
+        result["price"] = store.price_block()
+        return jsonify(result)
 
     @app.get("/api/nodes/<pubkey>/events")
     def node_events(pubkey: str):
