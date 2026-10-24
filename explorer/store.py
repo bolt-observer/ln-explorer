@@ -333,6 +333,20 @@ CENTRALITY_METRICS = RANK_METRICS[2:]
 RANK_HISTORY_RETENTION_SECONDS = 365 * 86400
 RANK_SPARKLINE_DAYS = 90
 
+# --- Peer overlap and who-to-connect suggestions ----------------------------
+#
+# overlap() answers "how much do these two nodes' peer sets overlap" (the
+# original platform's get_overlap); suggestions() answers "which
+# well-connected nodes are far enough away to be worth a channel".
+SUGGESTION_SORTS = frozenset({"betweenness", "capacity", "eigenvector"})
+SUGGESTION_RANK_FIELDS = {
+    "betweenness": "betweenness_rank",
+    "eigenvector": "eigenvector_rank",
+}
+SUGGESTION_MIN_CHANNELS = 5
+SUGGESTION_CANDIDATE_CAP = 300
+SUGGESTION_SHARED_PEERS_LIMIT = 50
+
 
 def _utc_day(ts: float | None = None) -> int:
     """Midnight UTC of ``ts`` as an epoch second (same key the prices table uses)."""
@@ -2515,8 +2529,9 @@ class Store:
             "total_count": total,
         }
 
-    def shortest_paths(self, source: str) -> dict[str, int]:
-        adjacency = self.adjacency()
+    def shortest_paths(self, source: str, adjacency: dict[str, list[str]] | None = None) -> dict[str, int]:
+        """Hop distance from ``source`` to every reachable node (BFS)."""
+        adjacency = self.adjacency() if adjacency is None else adjacency
         if source not in adjacency:
             return {source: 0} if source in self.nodes else {}
         distance = {source: 0}
@@ -2530,6 +2545,144 @@ class Store:
                     distance[peer] = distance[current] + 1
                     queue.append(peer)
         return distance
+
+    def overlap(self, a: str, b: str) -> dict | None:
+        """How much the peer sets of two nodes overlap (original get_overlap).
+
+        Peers come from adjacency(), so a channel disabled both ways does not
+        make its endpoints peers, and parallel channels count once.
+        ``jaccard`` is shared/union (the original's percentage), ``overlap_a``
+        is the share of a's peers that b also has. None when either node is
+        unknown.
+        """
+        if a not in self.nodes or b not in self.nodes:
+            return None
+        adjacency = self.adjacency()
+        peers_a = set(adjacency.get(a, ()))
+        peers_b = set(adjacency.get(b, ()))
+        shared = peers_a & peers_b
+        union = peers_a | peers_b
+        # The busiest shared peers first, capped for the API payload.
+        listed = sorted(
+            shared,
+            key=lambda peer: (
+                -(self.derived.get(peer) or {}).get("num_channels", 0),
+                peer,
+            ),
+        )[:SUGGESTION_SHARED_PEERS_LIMIT]
+        return {
+            "a": a,
+            "b": b,
+            "a_alias": self.nodes[a].alias,
+            "b_alias": self.nodes[b].alias,
+            "a_peers": len(peers_a),
+            "b_peers": len(peers_b),
+            "shared_peers": len(shared),
+            "union": len(union),
+            "jaccard": len(shared) / len(union) if union else 0.0,
+            "overlap_a": len(shared) / len(peers_a) if peers_a else 0.0,
+            "overlap_b": len(shared) / len(peers_b) if peers_b else 0.0,
+            "shared": [
+                {
+                    "pubkey": peer,
+                    "alias": self.nodes[peer].alias,
+                    "num_channels": (self.derived.get(peer) or {}).get(
+                        "num_channels", 0
+                    ),
+                }
+                for peer in listed
+            ],
+        }
+
+    def suggestions(
+        self,
+        pubkey: str,
+        min_hops: int = 2,
+        limit: int = 20,
+        sort: str = "betweenness",
+    ) -> dict | None:
+        """Well-connected nodes at ``min_hops`` or more hops from ``pubkey``.
+
+        Candidates are the nodes the BFS over adjacency() reaches at
+        ``min_hops`` or more, minus nodes with fewer than
+        SUGGESTION_MIN_CHANNELS channels (a channel to a node with three
+        channels buys little reach). They are ranked by the chosen centrality
+        rank (ascending, nodes without a rank last) or by capacity
+        (descending); only the top SUGGESTION_CANDIDATE_CAP candidates get
+        their per-node attributes computed, which bounds the cost on the full
+        graph. ``new_peers`` per candidate counts how many of its peers are
+        currently at two or more hops from the source or not reachable at
+        all - what a channel to it would newly open up. Raises ValueError on
+        an unknown ``sort``; None when ``pubkey`` is unknown.
+        """
+        if sort not in SUGGESTION_SORTS:
+            raise ValueError(
+                f"unknown sort: {sort!r} "
+                f"(use one of {', '.join(sorted(SUGGESTION_SORTS))})"
+            )
+        if pubkey not in self.nodes:
+            return None
+        min_hops = max(1, int(min_hops))
+        limit = max(1, int(limit))
+        adjacency = self.adjacency()
+        distances = self.shortest_paths(pubkey, adjacency)
+        candidates = [
+            node
+            for node, hops in distances.items()
+            if hops >= min_hops
+            and (self.derived.get(node) or {}).get("num_channels", 0)
+            >= SUGGESTION_MIN_CHANNELS
+        ]
+
+        def metric(node: str):
+            if sort == "capacity":
+                return (
+                    -(self.derived.get(node) or {}).get("total_capacity", 0),
+                    node,
+                )
+            rank = (self.metrics.get(node) or {}).get(SUGGESTION_RANK_FIELDS[sort])
+            # Nodes without the rank yet (metrics still running) sort last.
+            return (rank is None, rank if rank is not None else 0, node)
+
+        candidates.sort(key=metric)
+        evaluated = candidates[:SUGGESTION_CANDIDATE_CAP]
+        suggestions = []
+        for node in evaluated[:limit]:
+            info = self.derived.get(node) or {}
+            entry = {
+                "pubkey": node,
+                "alias": self.nodes[node].alias,
+                "hops": distances[node],
+                "capacity": info.get("total_capacity", 0),
+                "channels": info.get("num_channels", 0),
+                "new_peers": sum(
+                    1
+                    for peer in adjacency.get(node, ())
+                    if (hops := distances.get(peer)) is None or hops >= 2
+                ),
+            }
+            metrics = self.metrics.get(node) or {}
+            for field in (
+                "betweenness_rank",
+                "betweenness_weighted_rank",
+                "closeness_rank",
+                "closeness_weighted_rank",
+                "eigenvector_rank",
+                "eigenvector_weighted_rank",
+            ):
+                entry[field] = metrics.get(field)
+            suggestions.append(entry)
+        return {
+            "pubkey": pubkey,
+            "alias": self.nodes[pubkey].alias,
+            "min_hops": min_hops,
+            "sort": sort,
+            "limit": limit,
+            "min_channels": SUGGESTION_MIN_CHANNELS,
+            "candidates": len(candidates),
+            "evaluated": len(evaluated),
+            "suggestions": suggestions,
+        }
 
     def query_nodes(
         self,
