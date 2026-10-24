@@ -25,5 +25,7 @@ python3 daily_fees.py lnresearch.npz ../../explorer/datasets/fee_daily_lnresearc
 
 ```bash
 curl -s https://bitcoin.ninja/ln-replay-data/channel_updates.bin | python3 extract_ninja.py archive.npz
-python3 daily_fees.py archive.npz ../../explorer/datasets/fee_daily_gossip_archive.csv gossip-archive "$(date +%s)"
+python3 daily_fees_recv.py archive.npz ../../explorer/datasets/fee_daily_gossip_archive.csv gossip-archive
 ```
+
+This archive is ordered by receive time, so `daily_fees_recv.py` (low memory, no global sort) builds each day's state from the updates *received* before 00:00 UTC; the other definitions are identical. Current file: 31 Oct 2024 to 28 Jul 2026, 636 days, no gaps.
