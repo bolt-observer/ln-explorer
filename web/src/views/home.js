@@ -24,11 +24,13 @@ export function mapChrome(el, { inspector = false } = {}) {
   const zoom = document.createElement("div");
   zoom.className = "zoom glass";
   zoom.innerHTML = `
+    <button type="button" class="btn icon mode3d" data-z="mode" aria-pressed="false" aria-label="3D view">3D</button>
+    <hr class="hr" />
     <button type="button" class="btn icon" data-z="in" aria-label="Zoom in">${icon("plus")}</button>
     <button type="button" class="btn icon" data-z="out" aria-label="Zoom out">${icon("minus")}</button>
     <hr class="hr" />
-    <button type="button" class="btn icon" data-z="rotl" aria-label="Rotate map left" title="Rotate left (or Shift+drag / right-drag)">${icon("rotL")}</button>
-    <button type="button" class="btn icon" data-z="rotr" aria-label="Rotate map right" title="Rotate right (or Shift+drag / right-drag)">${icon("rotR")}</button>
+    <button type="button" class="btn icon" data-z="rotl" aria-label="Rotate map left">${icon("rotL")}</button>
+    <button type="button" class="btn icon" data-z="rotr" aria-label="Rotate map right">${icon("rotR")}</button>
     <hr class="hr" />
     <button type="button" class="btn icon" data-z="fit" aria-label="Reset view: no rotation, whole network" title="Reset view">${icon("fit")}</button>`;
   zoom.addEventListener("click", (event) => {
@@ -38,7 +40,26 @@ export function mapChrome(el, { inspector = false } = {}) {
     if (which === "rotl") map.rotateLeft();
     if (which === "rotr") map.rotateRight();
     if (which === "fit") map.fit();
+    if (which === "mode") {
+      const next = map.mode() === "3d" ? "2d" : "3d";
+      syncMode(next);
+      map.setMode(next).catch((error) => {
+        console.warn("3D map unavailable", error);
+        map.setMode("2d");
+        syncMode("2d");
+      });
+    }
   });
+  const modeBtn = zoom.querySelector('[data-z="mode"]');
+  const rotHint = (on3d) => (on3d ? "Drag to orbit on any axis · right-drag to pan" : "Shift+drag or right-drag to rotate");
+  function syncMode(mode) {
+    const on3d = mode === "3d";
+    modeBtn.setAttribute("aria-pressed", String(on3d));
+    modeBtn.title = on3d ? "Back to the 2D map" : "3D view: orbit the network on any axis";
+    zoom.querySelectorAll('[data-z="rotl"], [data-z="rotr"]').forEach((b) => (b.title = rotHint(on3d)));
+  }
+  syncMode(map.mode());
+  modeBtn.hidden = !map.supports3d();
   el.appendChild(zoom);
   document.body.dataset.inspector = inspector ? "1" : "";
 
