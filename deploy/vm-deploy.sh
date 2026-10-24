@@ -8,11 +8,18 @@
 # 3. Rebuilds and restarts in the background; output goes to /tmp/build.log.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-VOLUME=explorer_explorer-data
-CONTAINER=explorer-explorer-1
+# Keep whatever compose project is already running (its volume holds the
+# history); fall back to COMPOSE_PROJECT_NAME, then the checkout directory name.
+running=$(docker ps --filter "label=com.docker.compose.service=explorer" \
+  --format '{{.Label "com.docker.compose.project"}}' | head -n1)
+default_project=$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
+export COMPOSE_PROJECT_NAME=${running:-${COMPOSE_PROJECT_NAME:-$default_project}}
+VOLUME=${COMPOSE_PROJECT_NAME}_explorer-data
+CONTAINER=$(docker ps --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" \
+  --filter "label=com.docker.compose.service=explorer" --format '{{.Names}}' | head -n1)
 BACKUP_DIR=${BACKUP_DIR:-$HOME/backups}
 KEEP_BACKUPS=${KEEP_BACKUPS:-5}
-export COMPOSE_PROJECT_NAME=explorer
+echo "compose project: $COMPOSE_PROJECT_NAME, volume: $VOLUME"
 
 if ! docker volume inspect "$VOLUME" >/dev/null 2>&1; then
   if compgen -G "$BACKUP_DIR/explorer-*.sqlite" >/dev/null && [ "${ALLOW_NEW_VOLUME:-0}" != 1 ]; then
@@ -23,7 +30,7 @@ if ! docker volume inspect "$VOLUME" >/dev/null 2>&1; then
   echo "volume $VOLUME not found: first deploy, it will be created"
 fi
 
-if docker ps -q -f "name=^${CONTAINER}$" | grep -q .; then
+if [ -n "$CONTAINER" ]; then
   mkdir -p "$BACKUP_DIR"
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
   docker exec "$CONTAINER" python -c "import sqlite3; s = sqlite3.connect('/data/explorer.sqlite'); d = sqlite3.connect('/tmp/backup.sqlite'); s.backup(d); d.close()"

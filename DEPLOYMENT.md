@@ -66,12 +66,12 @@ The sqlite file lives in the `explorer-data` volume, so a container recreate doe
 
 ## Keeping the history across deploys
 
-All history (snapshots, fee history, events, rank history) lives in `/data/explorer.sqlite` inside the Docker volume. The compose file pins the volume name to `explorer_explorer-data`, so a different checkout directory or compose project name still mounts the same data. Nothing in the app drops tables; retention only prunes rows older than each table's window.
+All history (snapshots, fee history, events, rank history) lives in `/data/explorer.sqlite` inside the Docker volume. The volume is named `<compose project>_explorer-data`; the project defaults to the checkout directory name, so always deploy from the same directory (or set `COMPOSE_PROJECT_NAME`). `deploy/vm-deploy.sh` reuses the project of the running container automatically. Nothing in the app drops tables; retention only prunes rows older than each table's window.
 
 Redeploy on the VM with:
 
 ```bash
-cd ~/explorer && git fetch origin && git checkout --detach origin/main && bash deploy/vm-deploy.sh
+cd ~/explorer && git fetch origin && git checkout --detach origin/main && bash deploy/vm-deploy.sh   # the bolt-explorer VM uses project "explorer"
 ```
 
 `deploy/vm-deploy.sh` takes an online sqlite backup into `~/backups/explorer-<UTC time>.sqlite` first (newest 5 kept), refuses to start without the volume when backups exist (set `ALLOW_NEW_VOLUME=1` to override), then rebuilds in the background (`/tmp/build.log`).
@@ -80,7 +80,7 @@ A volume only disappears with `docker compose down -v`, `docker volume rm`, or a
 
 ```bash
 docker compose stop explorer
-docker run --rm -v explorer_explorer-data:/data -v ~/backups:/b alpine sh -c "cp /b/explorer-YYYYMMDDTHHMMSSZ.sqlite /data/explorer.sqlite && chown 10001:10001 /data/explorer.sqlite"
+docker run --rm -v <project>_explorer-data:/data -v ~/backups:/b alpine sh -c "cp /b/explorer-YYYYMMDDTHHMMSSZ.sqlite /data/explorer.sqlite && chown 10001:10001 /data/explorer.sqlite"
 docker compose start explorer
 ```
 
