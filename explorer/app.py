@@ -186,6 +186,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
             range_name = "all"
         return jsonify(store.history_payload(range_name))
 
+    @app.get("/api/fees/history")
+    def fee_history():
+        range_name = request.args.get("range", "all")
+        if range_name not in {"1y", "3y", "all"}:
+            range_name = "all"
+        return jsonify(store.fee_history_payload(range_name))
+
     @app.get("/api/snapshots")
     def snapshots():
         try:
@@ -452,6 +459,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
                         logger.info("On-demand channel lookup failed: %s", exc)
         view = store.channel_view(scid)
         return jsonify(view)
+
+    @app.get("/api/channels/<channel_id>/policy-history")
+    def channel_policy_history(channel_id: str):
+        scid = parse_scid(channel_id)
+        if scid is None:
+            return jsonify({"error": "invalid channel id"}), 400
+        return jsonify({"scid": scid, "changes": store.channel_policy_history(scid)})
 
     @app.get("/api/search")
     def search():
