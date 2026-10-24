@@ -80,7 +80,7 @@ footer {
 }
 
 .stats-row, .split, .card-grid { display: grid; gap: 0.8rem; }
-.stats-row { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 0.8rem; }
+.stats-row { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin-bottom: 0.8rem; }
 .card {
   background: var(--bg-card);
   border: 1px solid var(--line);
@@ -176,7 +176,17 @@ tr:hover td { background: #242424; }
 .policy { font-size: 0.92rem; line-height: 1.55; }
 .tag { display: inline-block; border: 1px solid #345; color: var(--mint); border-radius: 999px; padding: 0.05rem 0.45rem; font-size: 0.75rem; margin-right: 0.25rem; }
 .tag.off { color: var(--danger); border-color: #633; }
-.chart { width: 100%; height: 260px; background: #141414; border-radius: 10px; }
+.chart { width: 100%; height: 440px; background: #141414; border-radius: 10px; }
+.chart-head { display: flex; justify-content: space-between; align-items: center; gap: 0.8rem; flex-wrap: wrap; margin-bottom: 0.3rem; }
+.chart-head h2 { margin: 0; }
+.chart-tools { display: flex; gap: 0.5rem; align-items: center; }
+.seg { display: inline-flex; border: 1px solid #333; border-radius: 999px; overflow: hidden; }
+.seg button { background: transparent; border: 0; color: var(--muted); padding: 0.25rem 0.7rem; cursor: pointer; font-size: 0.8rem; }
+.seg button:hover { color: var(--text); }
+.seg button.active { background: var(--mint); color: #06281d; font-weight: 650; }
+.chart-legend { display: flex; align-items: center; gap: 0.45rem; margin: 0.45rem 0; }
+.legend-line { display: inline-block; width: 1.6rem; height: 0; border-top: 2px solid var(--mint); vertical-align: middle; }
+.legend-line.dashed { border-top-style: dashed; }
 .empty { padding: 2rem 1rem; color: var(--muted); text-align: center; }
 
 @media (max-width: 960px) {

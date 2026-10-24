@@ -688,72 +688,218 @@ async function renderSearch(root) {
     }`;
 }
 
-function drawHistory(points) {
+const PANEL_HEIGHT = 112;
+const PANEL_GAP = 14;
+const AXIS_HEIGHT = 24;
+const HISTORY_GAP_SECONDS = 10 * 86400;
+const CAP_COLORS = { capacity: "#1DFEBB", channels: "#FAD228", nodes: "#ffffff" };
+
+function drawHistory(payload, opts = {}) {
   const canvas = document.getElementById("history");
-  if (!canvas || !points.length) return;
-  const width = canvas.clientWidth || 800;
-  const height = 260;
+  if (!canvas) return;
+  const points = (payload && payload.points) || [];
+  const currency = opts.currency === "usd" ? "usd" : "btc";
+  const width = canvas.clientWidth || 900;
+  const padLeft = 60;
+  const padRight = 14;
+  const padTop = 16;
+  const height = padTop + 3 * PANEL_HEIGHT + 2 * PANEL_GAP + AXIS_HEIGHT + 6;
   canvas.width = width * devicePixelRatio;
   canvas.height = height * devicePixelRatio;
   canvas.style.width = `${width}px`;
   canvas.style.height = `${height}px`;
   const ctx = canvas.getContext("2d");
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-  const rows = points.filter((point) => point.total_capacity && point.channel_count);
-  if (rows.length < 2) return;
-  const caps = rows.map((point) => point.total_capacity);
-  const chans = rows.map((point) => point.channel_count);
-  const minC = Math.min(...caps);
-  const maxC = Math.max(...caps);
-  const minH = Math.min(...chans);
-  const maxH = Math.max(...chans);
-  const pad = 28;
-  const x = (index) => pad + (index / (rows.length - 1)) * (width - pad * 2);
-  const yCap = (value) => height - pad - ((value - minC) / (maxC - minC || 1)) * (height - pad * 2);
-  const yChan = (value) => height - pad - ((value - minH) / (maxH - minH || 1)) * (height - pad * 2);
-  ctx.strokeStyle = "#333";
-  ctx.strokeRect(pad, pad, width - pad * 2, height - pad * 2);
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = "#1DFEBB";
-  ctx.beginPath();
-  caps.forEach((value, index) => {
-    const px = x(index);
-    const py = yCap(value);
-    if (index === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  });
-  ctx.stroke();
-  ctx.strokeStyle = "#FAD228";
-  ctx.beginPath();
-  chans.forEach((value, index) => {
-    const px = x(index);
-    const py = yChan(value);
-    if (index === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  });
-  ctx.stroke();
+  ctx.clearRect(0, 0, width, height);
+  if (!points.length) {
+    ctx.fillStyle = "#9aa39c";
+    ctx.font = "13px sans-serif";
+    ctx.fillText("No history yet. The first refresh records a snapshot.", padLeft, height / 2);
+    return;
+  }
+  // The two sources are never joined: mempool's totals and our own gossip
+  // snapshots count different things, so local runs as a dashed series.
+  const mempool = points.filter((point) => point.source !== "local");
+  const local = points.filter((point) => point.source === "local");
+  const tMin = Math.min(...points.map((point) => point.ts));
+  const tMax = Math.max(...points.map((point) => point.ts));
+  const span = Math.max(1, tMax - tMin);
+  const plotWidth = width - padLeft - padRight;
+  const x = (ts) => padLeft + ((ts - tMin) / span) * plotWidth;
+
+  ctx.strokeStyle = "#2c2c2c";
   ctx.fillStyle = "#9aa39c";
-  ctx.font = "12px sans-serif";
-  ctx.fillText("capacity", pad, 16);
-  ctx.fillStyle = "#FAD228";
-  ctx.fillText("channels", pad + 70, 16);
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "center";
+  const firstYear = Math.max(2018, new Date(tMin * 1000).getUTCFullYear());
+  const lastYear = new Date(tMax * 1000).getUTCFullYear();
+  for (let year = firstYear; year <= lastYear; year += 1) {
+    const ts = Date.UTC(year, 0, 1) / 1000;
+    if (ts < tMin || ts > tMax) continue;
+    const px = x(ts);
+    ctx.beginPath();
+    ctx.moveTo(px, padTop - 4);
+    ctx.lineTo(px, height - AXIS_HEIGHT);
+    ctx.stroke();
+    ctx.fillText(String(year), px, height - 8);
+  }
+  ctx.textAlign = "left";
+
+  const capacityValue = (point) => {
+    if (currency === "usd") return point.capacity_usd == null ? null : point.capacity_usd;
+    return point.total_capacity == null ? null : point.total_capacity / 1e8;
+  };
+  const panels = [
+    {
+      label: currency === "usd" ? "Capacity (USD)" : "Capacity (BTC)",
+      color: CAP_COLORS.capacity,
+      value: capacityValue,
+      format: (v) => (currency === "usd" ? `$${num(v, 0)}` : `${num(v, 0)} BTC`),
+    },
+    { label: "Channels", color: CAP_COLORS.channels, value: (p) => p.channel_count, format: (v) => num(v, 0) },
+    { label: "Nodes", color: CAP_COLORS.nodes, value: (p) => p.node_count, format: (v) => num(v, 0) },
+  ];
+
+  panels.forEach((panel, index) => {
+    const top = padTop + index * (PANEL_HEIGHT + PANEL_GAP);
+    const series = [
+      { points: mempool, dash: [] },
+      { points: local, dash: [5, 4] },
+    ].map((entry) => ({
+      ...entry,
+      points: entry.points.filter((point) => {
+        const value = panel.value(point);
+        return value != null && Number.isFinite(Number(value)) && Number(value) >= 0;
+      }),
+    }));
+    const values = series.flatMap((entry) => entry.points.map((point) => Number(panel.value(point))));
+    let lo = values.length ? Math.min(...values) : 0;
+    let hi = values.length ? Math.max(...values) : 1;
+    if (hi === lo) hi = lo + 1;
+    const y = (value) => top + PANEL_HEIGHT - 6 - ((value - lo) / (hi - lo)) * (PANEL_HEIGHT - 16);
+    ctx.strokeStyle = "#2c2c2c";
+    ctx.strokeRect(padLeft, top, plotWidth, PANEL_HEIGHT);
+    ctx.fillStyle = panel.color;
+    ctx.font = "11px sans-serif";
+    ctx.fillText(panel.label, padLeft + 6, top + 14);
+    ctx.fillStyle = "#9aa39c";
+    ctx.textAlign = "right";
+    if (values.length) {
+      ctx.fillText(panel.format(hi), width - padRight - 4, top + 14);
+      ctx.fillText(panel.format(lo), width - padRight - 4, top + PANEL_HEIGHT - 4);
+    } else {
+      ctx.fillText("no data", width - padRight - 4, top + 14);
+    }
+    ctx.textAlign = "left";
+    for (const entry of series) {
+      if (!entry.points.length) continue;
+      ctx.strokeStyle = panel.color;
+      ctx.lineWidth = 1.8;
+      ctx.setLineDash(entry.dash);
+      ctx.beginPath();
+      let previousTs = null;
+      entry.points.forEach((point) => {
+        const px = x(point.ts);
+        const py = y(Number(panel.value(point)));
+        // mempool's backends have gaps of weeks; do not draw across them.
+        if (previousTs === null || point.ts - previousTs > HISTORY_GAP_SECONDS) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+        previousTs = point.ts;
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (entry.points.length === 1) {
+        // A lone snapshot has no line yet; mark the point itself.
+        const point = entry.points[0];
+        ctx.fillStyle = panel.color;
+        ctx.beginPath();
+        ctx.arc(x(point.ts), y(Number(panel.value(point))), 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.lineWidth = 1;
+  });
+}
+
+function historyNote(history) {
+  return history.notes || "";
+}
+
+function btcPriceText(rates) {
+  if (!rates || !rates.USD) return "—";
+  const parts = [`$${num(rates.USD, 0)}`];
+  if (rates.EUR) parts.push(`€${num(rates.EUR, 0)}`);
+  return parts.join(" / ");
+}
+
+function feeTableRow(label, series) {
+  const cell = (value, digits = 1) => `<td>${num(value, digits)}</td>`;
+  return `<tr><td class="left">${label}</td>${cell(series.median)}${cell(series.mean_filtered)}${cell(
+    series.mean_capweighted
+  )}${cell(series.p90)}${cell(series.std)}${cell(series.min, 0)}${cell(series.max, 0)}${cell(series.mean)}</tr>`;
 }
 
 async function renderStats(root) {
   root.innerHTML = `<p class="hint">Loading statistics…</p>`;
-  const [stats, history] = await Promise.all([api("/api/stats"), api("/api/history")]);
+  const params = new URLSearchParams(location.search);
+  const range = ["1y", "3y", "all"].includes(params.get("range")) ? params.get("range") : "all";
+  const currency = params.get("cap") === "usd" ? "usd" : "btc";
+  const [stats, history] = await Promise.all([api("/api/stats"), api(`/api/history?range=${range}`)]);
   const reported = stats.reported || {};
+  const latestNet = stats.network_latest || {};
+  const fees = stats.fees || {};
+  const feeRate = fees.rate || {};
+  const feeBase = fees.base || {};
   root.innerHTML = `
     <div class="stats-row">
       <div class="card"><div class="stat-label">Gossip nodes</div><div class="stat-value">${num(stats.gossip_nodes)}</div></div>
       <div class="card"><div class="stat-label">Gossip channels</div><div class="stat-value">${num(stats.gossip_channels)}</div></div>
-      <div class="card"><div class="stat-label">Reported capacity</div><div class="stat-value">${sats(reported.total_capacity || stats.gossip_capacity)}</div></div>
+      <div class="card"><div class="stat-label">Network capacity (mempool.space${latestNet.ts ? `, ${new Date(latestNet.ts * 1000).toISOString().slice(0, 10)}` : ""})</div><div class="stat-value">${sats(latestNet.total_capacity || reported.total_capacity || stats.gossip_capacity)}</div></div>
       <div class="card"><div class="stat-label">Median fee</div><div class="stat-value">${num(stats.median_fee_rate_ppm, 0)} ppm</div></div>
+      <div class="card"><div class="stat-label">BTC price</div><div class="stat-value">${esc(btcPriceText(history.currency_rates))}</div></div>
     </div>
     <section class="card" style="margin-bottom:0.8rem">
-      <h2>Network over the past year</h2>
-      <p class="hint">Mint is capacity, yellow is channel count. The long series comes from the public mempool Lightning statistics. Gossip counts above are the live snapshot and are smaller than mempool's historical node total, which still includes nodes without a currently announced channel.</p>
+      <div class="chart-head">
+        <h2>Network history 2018–now</h2>
+        <div class="chart-tools">
+          <div class="seg" role="group" aria-label="Capacity unit">${[
+            ["btc", "BTC"],
+            ["usd", "USD"],
+          ]
+            .map(([value, label]) => `<button type="button" data-cap="${value}" class="${currency === value ? "active" : ""}">${label}</button>`)
+            .join("")}</div>
+          <div class="seg" role="group" aria-label="Time range">${[
+            ["1y", "1y"],
+            ["3y", "3y"],
+            ["all", "all"],
+          ]
+            .map(([value, label]) => `<button type="button" data-range="${value}" class="${range === value ? "active" : ""}">${label}</button>`)
+            .join("")}</div>
+        </div>
+      </div>
+      <p class="hint">Solid lines are mempool.space statistics${
+        history.external_until
+          ? `, which stop on ${new Date(history.external_until * 1000).toISOString().slice(0, 10)}`
+          : ""
+      }. Dashed lines continue with this explorer's own rapid-gossip-sync snapshots (about 5.1k nodes / 26.7k channels, capacity only partially known), which are not directly comparable with mempool's totals (16k nodes including unannounced and channel-less, 32.5k channels).</p>
       <canvas class="chart" id="history"></canvas>
+      <p class="chart-legend hint"><span class="legend-line solid"></span> mempool.space&nbsp;&nbsp;<span class="legend-line dashed"></span> this explorer (rapid gossip sync snapshot)</p>
+      <p class="hint">${esc(historyNote(history))}</p>
+    </section>
+    <section class="card" style="margin-bottom:0.8rem">
+      <h2>Routing fees across ${num(feeRate.count)} directed policies</h2>
+      <table>
+        <thead><tr>
+          <th class="left">Series</th><th>Median</th><th>Filtered mean</th><th>Cap-weighted mean</th><th>p90</th><th>Std dev</th><th>Min</th><th>Max</th><th>Raw mean</th>
+        </tr></thead>
+        <tbody>
+          ${feeTableRow("Fee rate (ppm)", feeRate)}
+          ${feeTableRow("Base fee (msat)", feeBase)}
+        </tbody>
+      </table>
+      <p class="hint">Raw mean is distorted by a few placeholder fees such as 2147483647 ppm; filtered mean drops values outside Tukey far-out fences. ${num(
+        stats.enabled_channels
+      )} channels have at least one non-disabled policy, ${num(stats.disabled_channels)} are disabled both ways.</p>
     </section>
     <div class="two">
       <section class="card"><h2>By capacity</h2><ol class="side-list">${(stats.top_capacity || [])
@@ -764,7 +910,13 @@ async function renderStats(root) {
         .join("")}</ol></section>
     </div>
     <p class="hint" style="margin-top:0.8rem">Median base fee ${num(stats.median_base_fee_msat)} msat. Disabled both ways: ${num(stats.disabled_channels)} channels. Capacity known for ${(stats.capacity_coverage * 100).toFixed(0)}% of channels. Snapshot ${when(stats.graph_timestamp)}.</p>`;
-  drawHistory(history.points || []);
+  drawHistory(history, { currency });
+  root.querySelectorAll("[data-range]").forEach((button) => {
+    button.onclick = () => go(`/stats?range=${button.dataset.range}&cap=${currency}`);
+  });
+  root.querySelectorAll("[data-cap]").forEach((button) => {
+    button.onclick = () => go(`/stats?range=${range}&cap=${button.dataset.cap}`);
+  });
 }
 
 async function draw() {

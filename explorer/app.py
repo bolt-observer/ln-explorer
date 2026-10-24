@@ -132,7 +132,23 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
 
     @app.get("/api/history")
     def history():
-        return jsonify({"points": store.history})
+        range_name = request.args.get("range", "all")
+        if range_name not in {"1y", "3y", "all"}:
+            range_name = "all"
+        return jsonify(store.history_payload(range_name))
+
+    @app.get("/api/snapshots")
+    def snapshots():
+        try:
+            limit = int(request.args.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        limit = max(1, min(limit, 2000))
+        return jsonify({"snapshots": store.raw_snapshots(limit)})
+
+    @app.get("/api/prices")
+    def prices():
+        return jsonify(store.price_payload())
 
     @app.get("/api/graph")
     def graph():

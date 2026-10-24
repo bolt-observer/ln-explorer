@@ -21,15 +21,19 @@ Open http://localhost:8000. The first snapshot is a couple of megabytes and is u
 | Source | What it provides | When |
 | --- | --- | --- |
 | [Rapid gossip sync](https://github.com/lightningdevkit/rust-lightning/tree/main/lightning-rapid-gossip-sync) snapshot (`RGS_URL`) | Live public topology and fee policies | Default. Works immediately |
-| [mempool.space Lightning API](https://mempool.space/docs/api/rest) | Aliases, capacity, sockets, search, multi-year totals | Default enrichment. Disable with `MEMPOOL_API=` |
+| [mempool.space Lightning API](https://mempool.space/docs/api/rest) | Aliases, capacity, sockets, search, multi-year totals, BTC prices | Default enrichment. Disable with `MEMPOOL_API=` |
 | Your LND `GET /v1/graph` | Aliases, capacity, and policies from your own node | `GRAPH_SOURCE=lnd` |
 | A describegraph JSON or `.bin` snapshot on disk | Same shapes as the two sources above | `GRAPH_SOURCE=file` |
 
 Gossip does not include channel capacity or, on the version-1 snapshots the public LDK server publishes today, node aliases. Those come from mempool (or from LND, if you point the explorer at one). The graph itself does not wait on either.
 
+Network history comes from mempool's `/v1/lightning/statistics/all` (daily rows back to March 2018; `node_count` is computed as tor + clearnet + clearnet_tor + unannounced nodes) plus `/v1/lightning/statistics/1y`, fetched at most once per 24h and cached in sqlite. mempool.space answers from several backends whose Lightning statistics have different gaps (some stopped updating on 2026-08-30, others are current), so each daily fetch samples `statistics/all` three times and merges the rows by timestamp; the chart breaks lines across gaps longer than 10 days. The explorer's own gossip snapshots are drawn as a separate dashed line because the two counts are not directly comparable. BTC prices (`/v1/prices` every refresh, `/v1/historical-price` downsampled to one row per UTC day, once per 24h) add a USD view of network capacity.
+
 The refresh job is a thread inside the web process. It re-downloads the snapshot every `REFRESH_SECONDS` (default 3 hours), then pulls mempool totals, the world map and per-country node lists, a paced run of channel lists (the first request for a node returns up to 1000 capacities; longer lists continue in pages of 10, saved in sqlite and continued next time), and individual profiles for nodes that are still unnamed. A failed profile is skipped. HTTP 429 backs off and stops that batch. Metrics run after those fills. `docker compose logs -f` shows each pass. Nothing else has to be cron'd.
 
 Betweenness and closeness are sampled (seeded from the snapshot, so a given graph yields the same ranks). Eigenvector centrality is a power iteration. Exact betweenness on the full graph is the wrong trade for a small VM; the original platform precomputed it offline for the same reason.
+
+Every refresh also records one aggregate row of the live graph (channel counts, capacity, and the full fee distribution with Tukey far-out outlier filtering, because a few nodes still announce placeholder fees such as 2147483647 ppm) into sqlite; rows older than three years are pruned.
 
 ## Pages
 
@@ -37,10 +41,10 @@ Betweenness and closeness are sampled (seeded from the snapshot, so a given grap
 - `/nodes` filterable node table: capacity, fees, protocols, centrality ranks, optional reference node.
 - `/node/<pubkey>` channels, policies, and a shortest-path lookup.
 - `/channel/<scid>` both directions. `blockxindexxoutput` and the numeric id both work.
-- `/stats` gossip totals, mempool history, top nodes.
+- `/stats` gossip totals, fee distribution, multi-year history chart (mempool.space plus own snapshots), top nodes.
 - `/search?q=` alias, pubkey, or channel id.
 
-API lives under `/api/` (`/api/health`, `/api/status`, `/api/stats`, `/api/history`, `/api/graph`, `/api/nodes`, `/api/channels/<id>`, `/api/search`, `/api/path`).
+API lives under `/api/` (`/api/health`, `/api/status`, `/api/stats`, `/api/history?range=1y|3y|all`, `/api/snapshots`, `/api/prices`, `/api/graph`, `/api/nodes`, `/api/channels/<id>`, `/api/search`, `/api/path`).
 
 ## Configuration
 
