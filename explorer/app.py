@@ -10,6 +10,7 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, request, send_from_directory
 
 from explorer.config import Settings
+from explorer.features import FILTER_NAMES
 from explorer.refresh import enrich_channel, enrich_node, start_refresh
 from explorer.rgs import parse_scid
 from explorer.sources import Mempool
@@ -241,6 +242,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
         quantifier = request.args.get("quantifier", "all")
         if quantifier not in {"all", "any", "none"}:
             quantifier = "all"
+        feature = (request.args.get("feature") or "").strip()
+        if feature and feature not in FILTER_NAMES:
+            return jsonify({"error": "unknown feature filter"}), 400
         result = store.query_nodes(
             text=request.args.get("q", "")[:200],
             protocols=protocols,
@@ -252,8 +256,15 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
             page_size=page_size,
             reference=reference or None,
             reachable_only=request.args.get("reachable") == "1",
+            feature=feature or None,
         )
         return jsonify(result)
+
+    @app.get("/api/autocomplete")
+    def autocomplete():
+        """Local node suggestions for the reference and search inputs."""
+        text = (request.args.get("q") or "").strip()[:200]
+        return jsonify(store.autocomplete(text, _bounded_int("limit", 8, 1, 20)))
 
     @app.get("/api/nodes/<pubkey>")
     def one_node(pubkey: str):

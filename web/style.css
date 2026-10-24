@@ -44,6 +44,13 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monosp
   text-decoration: none;
 }
 .brand .dot { color: var(--mint); }
+.brand-text { display: flex; flex-direction: column; line-height: 1.15; }
+.brand-sub {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
 .topbar nav { display: flex; gap: 0.35rem; }
 .topbar nav a {
   color: #d5d5d5;
@@ -77,7 +84,9 @@ footer {
   color: var(--muted);
   border-top: 1px solid var(--line);
   font-size: 0.85rem;
+  flex-wrap: wrap;
 }
+footer a { color: var(--mint); }
 
 .stats-row, .split, .card-grid { display: grid; gap: 0.8rem; }
 .stats-row { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin-bottom: 0.8rem; }
@@ -189,6 +198,55 @@ tr:hover td { background: #242424; }
 .legend-line.dashed { border-top-style: dashed; }
 .legend-line.yellow { border-top-color: var(--yellow); }
 .empty { padding: 2rem 1rem; color: var(--muted); text-align: center; }
+
+/* Autocomplete dropdown (reference node, path box, header search) */
+.ac-host { position: relative; }
+.ac-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  list-style: none;
+  margin: 0;
+  padding: 0.3rem;
+  background: #161616;
+  border: 1px solid #333;
+  border-radius: 10px;
+  max-height: 17rem;
+  overflow: auto;
+  box-shadow: var(--shadow);
+}
+.ac-opt {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ac-opt:hover, .ac-opt.active { background: #22423a; }
+.ac-opt .ac-alias { flex: 1; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+
+/* Feature badges */
+.feat-badges { display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0.3rem 0; }
+.feat {
+  display: inline-block;
+  border: 1px solid #3a4a45;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.72rem;
+}
+.feat.req { border-color: var(--yellow); color: var(--yellow); }
+.feat.hl { background: var(--mint); border-color: var(--mint); color: #06281d; font-weight: 650; }
+.tag.feat-mini {
+  font-size: 0.68rem;
+  padding: 0.02rem 0.4rem;
+  margin-right: 0.15rem;
+}
+.tag.feat-mini.hl { color: #06281d; background: var(--mint); border-color: var(--mint); }
 
 .chart.flows { height: 240px; }
 .kv.three { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin: 0.6rem 0; }

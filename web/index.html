@@ -8,7 +8,11 @@
       name="description"
       content="Public Lightning Network explorer: live gossip graph, node and channel pages, search, and network stats."
     />
-    <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+    <meta name="theme-color" content="#121212" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="stylesheet" href="/style.css" />
     <!--PLAUSIBLE-->
   </head>
@@ -16,7 +20,10 @@
     <header class="topbar">
       <a class="brand" href="/">
         <img src="/logo.svg" alt="" width="36" height="36" />
-        <span>bolt<span class="dot">.</span>observer</span>
+        <span class="brand-text">
+          <span>bolt<span class="dot">.</span>observer</span>
+          <span class="brand-sub">Lightning explorer</span>
+        </span>
       </a>
       <nav>
         <a href="/" data-nav="graph">Graph</a>
@@ -38,7 +45,10 @@
     <div id="sync-banner" class="sync-banner" hidden></div>
     <main id="app"></main>
     <footer>
-      <span>Public Lightning gossip · no accounts</span>
+      <span>
+        © bolt.observer <span id="footer-year"></span> · data: LDK rapid gossip sync · mempool.space ·
+        <a href="https://github.com/bolt-observer/ln-explorer">source on GitHub</a> · no cookies, no tracking
+      </span>
       <span id="footer-meta"></span>
     </footer>
     <script src="/static/app.js"></script>

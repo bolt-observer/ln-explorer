@@ -14,6 +14,7 @@ import threading
 import time
 
 from explorer.config import Settings
+from explorer.features import bits_from_mempool
 from explorer.rgs import parse_scid
 from explorer.sources import Mempool, SourceError, fetch_lnd, fetch_rgs, load_graph_file
 from explorer.store import CLOSE_MAX_LOOKUPS, Store
@@ -497,18 +498,21 @@ def enrich_node(store: Store, mempool: Mempool, pubkey: str) -> None:
     payload = mempool.node(pubkey)
     if not isinstance(payload, dict):
         return
-    store.apply_node_enrichment(
-        pubkey,
-        {
-            "alias": payload.get("alias") or "",
-            "color": payload.get("color") or "",
-            "addresses": _sockets(payload.get("sockets")),
-            "capacity": payload.get("capacity") or 0,
-            "country": _country_name(payload.get("country")),
-            "city": _country_name(payload.get("city")),
-            "first_seen": payload.get("first_seen"),
-        },
-    )
+    fields = {
+        "alias": payload.get("alias") or "",
+        "color": payload.get("color") or "",
+        "addresses": _sockets(payload.get("sockets")),
+        "capacity": payload.get("capacity") or 0,
+        "country": _country_name(payload.get("country")),
+        "city": _country_name(payload.get("city")),
+        "first_seen": payload.get("first_seen"),
+    }
+    # No extra call: the same profile also answers feature bits, as a list of
+    # {bit, ...} objects in recent mempool versions or as a hex string.
+    bits = bits_from_mempool(payload)
+    if bits:
+        fields["features"] = bits
+    store.apply_node_enrichment(pubkey, fields)
 
 
 def enrich_channel(store: Store, mempool: Mempool, scid: int) -> dict | None:

@@ -5,8 +5,11 @@ import forceAtlas2 from "graphology-layout-forceatlas2";
 const app = document.getElementById("app");
 const banner = document.getElementById("sync-banner");
 const footerMeta = document.getElementById("footer-meta");
+const footerYear = document.getElementById("footer-year");
 const searchForm = document.getElementById("search-form");
 const searchInput = document.getElementById("search-input");
+
+if (footerYear) footerYear.textContent = String(new Date().getFullYear());
 
 let renderer = null;
 let pollTimer = null;
@@ -89,6 +92,115 @@ function esc(value) {
 function pubkeyChip(pubkey) {
   return `<button class="pubkey mono" type="button" data-copy="${esc(pubkey)}" title="Copy public key">${esc(shortKey(pubkey))}</button>`;
 }
+
+// --- Node autocomplete (reference inputs, path box, header search) ---------
+
+function attachAutocomplete(input, onPick) {
+  const host = input.parentElement;
+  if (!host) return;
+  host.classList.add("ac-host");
+  const box = document.createElement("ul");
+  const boxId = `ac-list-${Math.random().toString(36).slice(2, 8)}`;
+  box.className = "ac-list";
+  box.id = boxId;
+  box.setAttribute("role", "listbox");
+  box.setAttribute("aria-label", "Node suggestions");
+  box.hidden = true;
+  host.appendChild(box);
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-expanded", "false");
+  input.setAttribute("aria-controls", boxId);
+  input.setAttribute("aria-autocomplete", "list");
+  input.setAttribute("autocomplete", "off");
+  let items = [];
+  let active = -1;
+  let timer = null;
+  let seq = 0;
+
+  const close = () => {
+    box.hidden = true;
+    active = -1;
+    items = [];
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+  };
+
+  const render = () => {
+    if (!items.length) {
+      close();
+      return;
+    }
+    box.innerHTML = items
+      .map(
+        (item, index) => `<li role="option" id="${boxId}-opt-${index}" class="ac-opt${index === active ? " active" : ""}" aria-selected="${index === active}" data-index="${index}"><span class="ac-alias">${esc(item.alias || "[no alias]")}</span><span class="hint mono">${esc(shortKey(item.pubkey))}</span><span class="hint">${num(item.num_channels)} ch</span></li>`
+      )
+      .join("");
+    box.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+    if (active >= 0) input.setAttribute("aria-activedescendant", `${boxId}-opt-${active}`);
+    else input.removeAttribute("aria-activedescendant");
+  };
+
+  const pick = (index) => {
+    const item = items[index];
+    if (!item) return;
+    input.value = item.pubkey;
+    close();
+    if (onPick) onPick(item);
+  };
+
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    const text = input.value.trim();
+    if (text.length < 2) {
+      seq += 1;
+      close();
+      return;
+    }
+    const mine = seq;
+    timer = setTimeout(async () => {
+      try {
+        const rows = await api(`/api/autocomplete?q=${encodeURIComponent(text)}&limit=8`);
+        if (mine !== seq) return;
+        items = rows;
+        active = -1;
+        render();
+      } catch (error) {
+        if (mine !== seq) return;
+        close();
+      }
+    }, 250);
+  });
+
+  input.addEventListener("keydown", (event) => {
+    if (box.hidden || !items.length) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      active = (active + 1) % items.length;
+      render();
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      active = active <= 0 ? items.length - 1 : active - 1;
+      render();
+    } else if (event.key === "Enter" && active >= 0) {
+      event.preventDefault();
+      pick(active);
+    } else if (event.key === "Escape") {
+      close();
+    }
+  });
+
+  box.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    const option = event.target.closest("li.ac-opt");
+    if (option) pick(Number(option.dataset.index));
+  });
+  input.addEventListener("blur", () => setTimeout(close, 150));
+}
+
+// Enter in the header box still runs the full /search; picking a suggestion
+// jumps straight to the node page.
+attachAutocomplete(searchInput, (item) => go(`/node/${item.pubkey}`));
 
 function destroyGraph() {
   if (renderer) {
@@ -195,17 +307,23 @@ function drawCanvas(payload) {
       y: cy + (node.y - (minY + maxY) / 2) * scale,
     });
     const pos = new Map(payload.nodes.map((node) => [node.pubkey, project(node)]));
-    ctx.strokeStyle = "rgba(29, 254, 187, 0.45)";
-    ctx.lineWidth = 1;
+    // Same capacity scaling as the sigma view: thick edges are big channels.
+    const maxCapacity = Math.max(1, ...payload.edges.map((edge) => edge.capacity || 0));
     payload.edges.forEach((edge) => {
       const a = pos.get(edge.a);
       const b = pos.get(edge.b);
       if (!a || !b) return;
+      const width =
+        edge.capacity > 0 ? 0.4 + 2.2 * Math.sqrt(edge.capacity / maxCapacity) : 0.4;
+      const share = Math.min(1, width / 2.6);
+      ctx.strokeStyle = `rgba(29, 254, 187, ${(0.3 + 0.55 * share).toFixed(3)})`;
+      ctx.lineWidth = Math.max(0.5, width);
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
       ctx.stroke();
     });
+    ctx.lineWidth = 1;
     const maxChannels = Math.max(...payload.nodes.map((node) => node.channels));
     payload.nodes.forEach((node) => {
       const point = pos.get(node.pubkey);
@@ -308,6 +426,8 @@ async function renderGraph(root) {
         .slice(0, 40)
         .map((node) => node.pubkey)
     );
+    // Edge width grows with capacity, like the original bokeh view.
+    const maxCapacity = Math.max(1, ...payload.edges.map((edge) => edge.capacity || 0));
     payload.edges.forEach((edge) => {
       if (!graph.hasNode(edge.a) || !graph.hasNode(edge.b) || edge.a === edge.b) return;
       if (graph.hasEdge(edge.a, edge.b)) return;
@@ -318,8 +438,10 @@ async function renderGraph(root) {
         for (let i = 0; i < key.length; i += 1) hash = (hash * 33 + key.charCodeAt(i)) >>> 0;
         if (hash % 4 !== 0) return;
       }
+      const size =
+        edge.capacity > 0 ? 0.4 + 2.2 * Math.sqrt(edge.capacity / maxCapacity) : 0.4;
       graph.addEdgeWithKey(edge.scid, edge.a, edge.b, {
-        size: bothHubs ? 1.3 : 0.6,
+        size,
         color: bothHubs ? "#1DFEBB" : "#14685a",
         scid: edge.scid,
       });
@@ -346,7 +468,7 @@ async function renderGraph(root) {
       labelDensity: 1,
       labelColor: { color: "#ffffff" },
       defaultEdgeColor: "#1DFEBB",
-      minEdgeThickness: 0.7,
+      minEdgeThickness: 0.4,
       enableEdgeEvents: true,
       hideEdgesOnMove: true,
       allowInvalidContainer: true,
@@ -388,9 +510,34 @@ const FILTER_FIELDS = [
   ["avg_capacity", "Average channel capacity"],
   ["betweenness_rank", "Betweenness rank"],
   ["closeness_rank", "Closeness rank"],
+  ["closeness_weighted_rank", "Closeness rank (weighted)"],
   ["eigenvector_rank", "Eigenvector rank"],
   ["eigenvector_weighted_rank", "Eigenvector rank (weighted)"],
 ];
+
+const FEATURE_FILTERS = [
+  ["", "any"],
+  ["wumbo", "wumbo"],
+  ["anchors", "anchors"],
+  ["dual_fund", "dual funding"],
+  ["onion_messages", "onion messages"],
+  ["route_blinding", "route blinding"],
+];
+
+function featureMiniBadges(node) {
+  if (!node.features || !node.features.length) return "";
+  const defs = [
+    ["wumbo", "W", "wumbo (large channels)"],
+    ["anchors", "A", "anchor channels"],
+    ["dual_fund", "D", "dual funding"],
+    ["onion_messages", "O", "onion messages"],
+    ["route_blinding", "R", "route blinding"],
+  ];
+  return defs
+    .filter(([key]) => node[key])
+    .map(([key, letter, title]) => `<span class="tag feat-mini${key === "wumbo" ? " hl" : ""}" title="${title}">${letter}</span>`)
+    .join("");
+}
 
 async function renderNodes(root) {
   const params = new URLSearchParams(location.search);
@@ -408,6 +555,9 @@ async function renderNodes(root) {
             <option value="tor">tor</option>
             <option value="ipv6">ipv6</option>
           </select>
+        </label>
+        <label class="field">Features
+          <select id="feature">${FEATURE_FILTERS.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select>
         </label>
         <label class="field">Match
           <select id="quantifier">
@@ -438,6 +588,7 @@ async function renderNodes(root) {
             <option value="med_out_ppm">fee rate</option>
             <option value="betweenness_rank">betweenness</option>
             <option value="closeness_rank">closeness</option>
+            <option value="closeness_weighted_rank">closeness (weighted)</option>
             <option value="eigenvector_rank">eigenvector</option>
             <option value="alias">alias</option>
           </select>
@@ -447,7 +598,7 @@ async function renderNodes(root) {
       <p class="hint">Betweenness and closeness are sampled. Rank 1 is the most central node. Reference node limits the table to its reachable neighborhood.</p>
       <div class="filter-row">
         <label class="field">Reference node pubkey
-          <input id="reference" type="text" value="${esc(params.get("reference") || "")}" placeholder="02…" style="min-width:22rem" />
+          <input id="reference" type="text" value="${esc(params.get("reference") || "")}" placeholder="02… type an alias" style="min-width:22rem" />
         </label>
         <label class="field"><span>Reachable only</span>
           <input id="reachable" type="checkbox" ${params.get("reachable") === "1" ? "checked" : ""} />
@@ -455,16 +606,19 @@ async function renderNodes(root) {
       </div>
     </section>
     <div id="node-table" class="card"><p class="hint">Loading nodes…</p></div>`;
-  ["protocol", "quantifier", "field", "rel", "sort"].forEach((id) => {
+  ["protocol", "quantifier", "field", "rel", "sort", "feature"].forEach((id) => {
     const value = params.get(id);
     if (value) document.getElementById(id).value = value;
   });
+  attachAutocomplete(document.getElementById("reference"));
   document.getElementById("apply").onclick = () => {
     const next = new URLSearchParams();
     const q = document.getElementById("q").value.trim();
     if (q) next.set("q", q);
     const protocol = document.getElementById("protocol").value;
     if (protocol) next.set("protocol", protocol);
+    const feature = document.getElementById("feature").value;
+    if (feature) next.set("feature", feature);
     next.set("quantifier", document.getElementById("quantifier").value);
     const field = document.getElementById("field").value;
     const value = document.getElementById("value").value;
@@ -500,7 +654,7 @@ async function loadNodeTable(params) {
     <table>
       <thead><tr>
         <th class="left">Alias</th><th class="left">Public key</th><th>Channels</th><th>Capacity</th>
-        <th>Median fee ppm</th><th>Median base msat</th><th>Betweenness</th><th>Closeness</th><th>Eigenvector</th><th class="left">Clearnet</th>
+        <th>Median fee ppm</th><th>Median base msat</th><th>Betweenness</th><th>Closeness</th><th>Eigenvector</th><th class="left">Clearnet</th><th class="left">Features</th>
       </tr></thead>
       <tbody>
         ${data.objects
@@ -516,6 +670,7 @@ async function loadNodeTable(params) {
             <td>${num(node.closeness_rank)}</td>
             <td>${num(node.eigenvector_rank)}</td>
             <td class="left">${node.ipv4 ? "v4 " : ""}${node.ipv6 ? "v6 " : ""}${node.tor ? "tor" : ""}</td>
+            <td class="left">${featureMiniBadges(node)}</td>
           </tr>`
           )
           .join("")}
@@ -543,11 +698,41 @@ function protocols(node) {
   ].join("");
 }
 
+function connectivityLabel(node) {
+  const clearnet = node.ipv4 || node.ipv6;
+  if (clearnet && node.tor) return "Clearnet and Tor";
+  if (clearnet) return "Clearnet only";
+  if (node.tor) return "Tor only";
+  return "none announced";
+}
+
+function featureBadges(node) {
+  // Nothing at all when this node's features are unknown.
+  if (!node.features || !node.features.length) return "";
+  return `<div class="feat-badges">${node.features
+    .map(
+      (feature) =>
+        `<span class="feat${feature.name === "option_support_large_channel" ? " hl" : ""}" title="bit ${feature.bit}${feature.required ? " (required)" : " (optional)"}">${esc(feature.name)}${feature.required ? " *" : ""}</span>`
+    )
+    .join("")}</div>`;
+}
+
+function statRows(rows) {
+  return `<table><tbody>${rows
+    .map(([label, value]) => `<tr><td class="left">${label}</td><td>${value}</td></tr>`)
+    .join("")}</tbody></table>`;
+}
+
 async function renderNode(root, pubkey) {
   root.innerHTML = `<p class="hint">Loading node…</p>`;
   const node = await api(`/api/nodes/${pubkey}`);
   const page = new URLSearchParams(location.search).get("page") || "1";
   const channels = await api(`/api/nodes/${pubkey}/channels?page=${page}&page_size=25`);
+  const addresses = node.addresses.length
+    ? `<ul class="side-list">${node.addresses
+        .map((address) => `<li class="mono" style="justify-content:flex-start;overflow-wrap:anywhere">${esc(address)}</li>`)
+        .join("")}</ul>`
+    : `<p class="hint">No announced addresses yet.</p>`;
   root.innerHTML = `
     <div class="title-row">
       <span class="swatch" style="background:${esc(node.color || "#1DFEBB")}"></span>
@@ -555,20 +740,88 @@ async function renderNode(root, pubkey) {
       ${protocols(node)}
     </div>
     <p>${pubkeyChip(node.pubkey)} ${node.city || node.country ? `<span class="hint">${esc([node.city, node.country].filter(Boolean).join(", "))}</span>` : ""}</p>
-    <div class="kv">
-      <div><div class="k">Capacity</div><div class="v">${fullSats(node.total_capacity)}</div></div>
-      <div><div class="k">Channels</div><div class="v">${num(node.num_channels)} <span class="hint">(${num(node.active_channels)} routable)</span></div></div>
-      <div><div class="k">Median outgoing fee</div><div class="v">${num(node.med_out_ppm, 1)} ppm</div></div>
-      <div><div class="k">Median base fee</div><div class="v">${num(node.med_out_base)} msat</div></div>
-      <div><div class="k">Betweenness rank</div><div class="v">${num(node.betweenness_rank)}</div></div>
-      <div><div class="k">Closeness rank</div><div class="v">${num(node.closeness_rank)}</div></div>
-      <div><div class="k">Eigenvector rank</div><div class="v">${num(node.eigenvector_rank)}</div></div>
-      <div><div class="k">Weighted eigenvector</div><div class="v">${num(node.eigenvector_weighted_rank)}</div></div>
+    ${featureBadges(node)}
+    <div class="stats-row" style="margin-top:0.6rem">
+      <div class="card">
+        <div class="stat-label">Channels</div>
+        <div class="stat-value">${num(node.num_channels)}</div>
+        <div class="hint">${num(node.active_channels)} routable</div>
+      </div>
+      <div class="card">
+        <div class="stat-label">Total capacity</div>
+        <div class="stat-value">${fullSats(node.total_capacity)}</div>
+        <div class="hint">source: ${esc(node.capacity_source)}</div>
+      </div>
+      <div class="card">
+        <div class="stat-label">Connectivity</div>
+        <div class="stat-value" style="font-size:1.2rem">${esc(connectivityLabel(node))}</div>
+        <div class="hint">first seen ${when(node.first_seen)}</div>
+      </div>
     </div>
-    <p class="hint">Capacity source: ${esc(node.capacity_source)}. First seen ${when(node.first_seen)}. ${node.addresses.length ? `Addresses: ${node.addresses.map(esc).join(", ")}` : "No announced addresses yet."}</p>
-    <form id="path-form" class="filter-row" style="margin-bottom:1rem">
+    <div class="two" style="margin-top:0.8rem">
+      <section class="card">
+        <h2>Addresses</h2>
+        ${addresses}
+      </section>
+      <section class="card">
+        <h2>Centrality</h2>
+        <table>
+          <thead><tr><th class="left">Metric</th><th>Rank</th><th>Weighted rank</th></tr></thead>
+          <tbody>
+            <tr><td class="left">Betweenness</td><td>${num(node.betweenness_rank)}</td><td>${num(node.betweenness_weighted_rank)}</td></tr>
+            <tr><td class="left">Closeness</td><td>${num(node.closeness_rank)}</td><td>${num(node.closeness_weighted_rank)}</td></tr>
+            <tr><td class="left">Eigenvector</td><td>${num(node.eigenvector_rank)}</td><td>${num(node.eigenvector_weighted_rank)}</td></tr>
+          </tbody>
+        </table>
+        <p class="hint">Rank 1 is the most central node${node.metrics_ready ? ", sampled from this snapshot" : " (still being computed)"}. Weighted ranks prefer paths over high-capacity channels.</p>
+      </section>
+    </div>
+    <div class="two" style="margin-top:0.8rem">
+      <section class="card">
+        <h2>Outgoing fee rate (ppm)</h2>
+        ${statRows([
+          ["Average", num(node.avg_out_ppm, 1)],
+          ["Median", num(node.med_out_ppm, 1)],
+          ["Maximum", num(node.max_out_ppm)],
+        ])}
+      </section>
+      <section class="card">
+        <h2>Incoming fee rate (ppm)</h2>
+        ${statRows([
+          ["Average", num(node.avg_in_ppm, 1)],
+          ["Median", num(node.med_in_ppm, 1)],
+        ])}
+      </section>
+    </div>
+    <div class="two" style="margin-top:0.8rem">
+      <section class="card">
+        <h2>Outgoing base fee (msat)</h2>
+        ${statRows([
+          ["Average", num(node.avg_out_base)],
+          ["Median", num(node.med_out_base)],
+          ["Maximum", num(node.max_out_base)],
+        ])}
+      </section>
+      <section class="card">
+        <h2>Incoming base fee (msat)</h2>
+        ${statRows([
+          ["Average", num(node.avg_in_base)],
+          ["Median", num(node.med_in_base)],
+        ])}
+      </section>
+    </div>
+    <section class="card" style="margin-top:0.8rem">
+      <h2>Channel capacity (sats)</h2>
+      ${statRows([
+        ["Average", num(node.avg_capacity)],
+        ["Median", num(node.med_capacity)],
+        ["Maximum", num(node.max_capacity)],
+      ])}
+      <p class="hint">Averages of fee fields drop far-out outliers (Tukey fences); maxima stay raw.</p>
+    </section>
+    <form id="path-form" class="filter-row" style="margin:0.8rem 0">
       <label class="field">Shortest path from
-        <input id="path-from" type="text" placeholder="source pubkey" style="min-width:22rem" />
+        <input id="path-from" type="text" placeholder="source pubkey or alias" style="min-width:22rem" />
       </label>
       <button class="btn" type="submit">Find path</button>
       <span id="path-result" class="hint"></span>
@@ -601,6 +854,7 @@ async function renderNode(root, pubkey) {
       </div>
     </div>
     <div class="card" id="node-history"><h2>History</h2><p class="hint">Loading events…</p></div>`;
+  attachAutocomplete(document.getElementById("path-from"));
   document.getElementById("path-form").onsubmit = async (event) => {
     event.preventDefault();
     const source = document.getElementById("path-from").value.trim();

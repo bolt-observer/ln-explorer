@@ -96,14 +96,19 @@ def _sample_sources(adjacency: dict[str, list[str]], samples: int, seed: int) ->
     return chosen[:count]
 
 
-def weighted_betweenness(
+def weighted_centrality(
     adjacency: dict[str, list[str]],
     weight,
     sources: list[str],
-) -> dict[str, float]:
-    """Dijkstra-Brandes. ``weight(u, v)`` is a positive distance."""
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Dijkstra-Brandes. ``weight(u, v)`` is a positive distance.
+
+    One pass per source yields both the betweenness contributions and the
+    harmonic closeness sum ``1/dist`` over the weighted shortest paths.
+    """
     nodes = _neighbors(adjacency)
     betweenness = {node: 0.0 for node in nodes}
+    harmonic = {node: 0.0 for node in nodes}
     for source in sources:
         if source not in nodes:
             continue
@@ -141,7 +146,10 @@ def weighted_betweenness(
                     delta[pred] += (sigma[pred] / sigma[node]) * (1.0 + delta[node])
             if node != source:
                 betweenness[node] += delta[node]
-    return {node: value / 2.0 for node, value in betweenness.items()}
+        for node, dist in distance.items():
+            if node != source and 0.0 < dist < math.inf:
+                harmonic[node] += 1.0 / dist
+    return {node: value / 2.0 for node, value in betweenness.items()}, harmonic
 
 
 def ranks(scores: dict[str, float]) -> dict[str, int]:
@@ -165,11 +173,14 @@ def compute_metrics(
     eigen = power_iteration(adjacency)
     if capacity_weight is None:
         between_w = betweenness
+        closeness_w = harmonic
         eigen_w = eigen
         weighted = False
     else:
         weight_sources = sources[: max(8, min(24, len(sources)))]
-        between_w = weighted_betweenness(adjacency, capacity_weight, weight_sources)
+        between_w, closeness_w = weighted_centrality(
+            adjacency, capacity_weight, weight_sources
+        )
         eigen_w = power_iteration(
             adjacency,
             edge_weight=lambda left, right: 1.0 / capacity_weight(left, right),
@@ -179,6 +190,7 @@ def compute_metrics(
     rank_b = ranks(betweenness)
     rank_bw = ranks(between_w)
     rank_c = ranks(harmonic)
+    rank_cw = ranks(closeness_w)
     rank_e = ranks(eigen)
     rank_ew = ranks(eigen_w)
     result = {}
@@ -187,11 +199,13 @@ def compute_metrics(
             "betweenness": betweenness[node],
             "betweenness_weighted": between_w.get(node, 0.0),
             "closeness": harmonic[node],
+            "closeness_weighted": closeness_w.get(node, 0.0),
             "eigenvector": eigen.get(node, 0.0),
             "eigenvector_weighted": eigen_w.get(node, 0.0),
             "betweenness_rank": rank_b.get(node),
             "betweenness_weighted_rank": rank_bw.get(node),
             "closeness_rank": rank_c.get(node),
+            "closeness_weighted_rank": rank_cw.get(node),
             "eigenvector_rank": rank_e.get(node),
             "eigenvector_weighted_rank": rank_ew.get(node),
         }
