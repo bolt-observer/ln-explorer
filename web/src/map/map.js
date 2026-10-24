@@ -24,6 +24,8 @@ export const DENSITY_STEPS = [100, 200, 400, 600, 800];
 
 const s = {
   container: null,
+  // Camera rotation (radians). Kept across renderer rebuilds (filter or density changes).
+  angle: 0,
   layer: null,
   tip: null,
   renderer: null,
@@ -298,19 +300,101 @@ function centerOn(nodes, { fitNeighbors = false, fitSelf = false, duration = 550
   const cy = pts.reduce((a, p) => a + p.y, 0) / pts.length;
   const freeW = Math.max(120, width - s.insets.left - s.insets.right);
   const freeH = Math.max(120, height - s.insets.top - s.insets.bottom);
+  const angle = s.angle;
   let ratio = camera.ratio;
   if (fitNeighbors || fitSelf) {
     const extentPts = fitSelf ? pts : [...pts, ...[...s.lit].map((n) => s.renderer.getNodeDisplayData(n)).filter(Boolean)];
-    const ex = Math.max(...extentPts.map((p) => Math.abs(p.x - cx))) * 2;
-    const ey = Math.max(...extentPts.map((p) => Math.abs(p.y - cy))) * 2;
-    const minDim = Math.min(width, height);
-    ratio = Math.max(0.2, Math.min(fitSelf ? 3 : 1.1, Math.max((ex * minDim) / freeW, (ey * minDim) / freeH) * 1.08));
+    // Measure the extent on screen at ratio 1 with the current rotation, so a
+    // rotated map is framed by its on-screen width and height.
+    const unit = { x: cx, y: cy, ratio: 1, angle };
+    const origin = s.renderer.framedGraphToViewport({ x: cx, y: cy }, { cameraState: unit });
+    let ex = 0;
+    let ey = 0;
+    for (const p of extentPts) {
+      const v = s.renderer.framedGraphToViewport(p, { cameraState: unit });
+      ex = Math.max(ex, Math.abs(v.x - origin.x) * 2);
+      ey = Math.max(ey, Math.abs(v.y - origin.y) * 2);
+    }
+    ratio = Math.max(0.2, Math.min(fitSelf ? 3 : 1.1, Math.max(ex / freeW, ey / freeH) * 1.08));
   }
-  const probe = { x: cx, y: cy, ratio, angle: 0 };
+  const probe = { x: cx, y: cy, ratio, angle };
   const freeX = s.insets.left + freeW / 2;
   const freeY = s.insets.top + freeH / 2;
   const at = s.renderer.viewportToFramedGraph({ x: freeX, y: freeY }, { cameraState: probe });
-  camera.animate({ x: cx + (cx - at.x), y: cy + (cy - at.y), ratio, angle: 0 }, { duration, easing: "quadraticInOut" });
+  camera.animate({ x: cx + (cx - at.x), y: cy + (cy - at.y), ratio, angle }, { duration, easing: "quadraticInOut" });
+}
+
+// ---------- rotation ----------
+const ROTATE_STEP = Math.PI / 12; // 15° per button press
+const TAU = Math.PI * 2;
+
+function rotateTo(angle, duration = 300) {
+  const camera = s.renderer?.getCamera();
+  if (!camera) return;
+  s.angle = angle;
+  camera.animate({ angle }, { duration, easing: "quadraticInOut" });
+}
+
+/** Shift+drag or right-drag rotates the camera around the centre of the view. */
+function wireRotation() {
+  if (s.rotationWired) return;
+  s.rotationWired = true;
+  const el = s.container;
+  let drag = null;
+  let swallowClick = false;
+  const pointerAngle = (event) => {
+    const box = el.getBoundingClientRect();
+    return Math.atan2(event.clientY - (box.top + box.height / 2), event.clientX - (box.left + box.width / 2));
+  };
+  const onMove = (event) => {
+    if (!drag || !s.renderer) return;
+    event.preventDefault();
+    const delta = pointerAngle(event) - drag.from;
+    if (Math.abs(delta) > 0.01) drag.moved = true;
+    s.angle = drag.start + delta;
+    s.renderer.getCamera().setState({ angle: s.angle });
+  };
+  const onUp = () => {
+    if (!drag) return;
+    swallowClick = drag.moved;
+    drag = null;
+    el.classList.remove("rotating");
+    window.removeEventListener("mousemove", onMove, true);
+    window.removeEventListener("mouseup", onUp, true);
+    // Normalise so later animations take the short way round.
+    s.angle = ((s.angle % TAU) + TAU) % TAU;
+    s.renderer?.getCamera().setState({ angle: s.angle });
+  };
+  // Capture on the container so sigma's own mouse captor (on a child canvas)
+  // never starts a pan for a rotation gesture.
+  el.addEventListener(
+    "mousedown",
+    (event) => {
+      if (!s.renderer) return;
+      const rotate = (event.button === 0 && event.shiftKey) || event.button === 2;
+      if (!rotate) return;
+      event.preventDefault();
+      event.stopPropagation();
+      hideTip();
+      drag = { start: s.renderer.getCamera().getState().angle, from: pointerAngle(event), moved: false };
+      el.classList.add("rotating");
+      window.addEventListener("mousemove", onMove, true);
+      window.addEventListener("mouseup", onUp, true);
+    },
+    true,
+  );
+  el.addEventListener(
+    "click",
+    (event) => {
+      if (!swallowClick) return;
+      swallowClick = false;
+      event.stopPropagation();
+    },
+    true,
+  );
+  el.addEventListener("contextmenu", (event) => {
+    if (s.renderer) event.preventDefault();
+  });
 }
 
 // ---------- renderer lifecycle ----------
@@ -348,7 +432,9 @@ function createRenderer() {
       edgeReducer,
       allowInvalidContainer: true,
     });
+    s.renderer.getCamera().setState({ angle: s.angle });
     wireEvents();
+    wireRotation();
     window.__explorerLayout = "sigma";
   } catch (error) {
     console.warn("WebGL map failed, using canvas fallback", error);
@@ -408,7 +494,11 @@ function wireEvents() {
     const inspecting = (route.parts.length === 0 && route.params.get("node")) || route.parts[0] === "channel";
     if (inspecting) go(homeUrl());
   });
-  r.getCamera().on("updated", hideTip);
+  r.getCamera().on("updated", (state) => {
+    hideTip();
+    // Two-finger touch rotation goes through sigma's touch captor; remember it.
+    s.angle = state.angle;
+  });
 }
 
 async function load(query, signal) {
@@ -561,7 +651,24 @@ export const map = {
   zoomOut() {
     s.renderer?.getCamera().animatedUnzoom({ duration: 250 });
   },
+  /** Reset view: no rotation, whole graph framed in the free area. */
   fit() {
-    s.renderer?.getCamera().animatedReset({ duration: 400 });
+    if (!s.renderer || !s.graph) return;
+    // Unwind to the nearest full turn so the reset takes the short way round.
+    s.angle = Math.round(s.renderer.getCamera().getState().angle / TAU) * TAU;
+    centerOn(s.graph.nodes(), { fitSelf: true, duration: 450 });
+  },
+  rotateBy(delta) {
+    if (s.renderer) rotateTo(s.renderer.getCamera().getState().angle + delta);
+  },
+  rotateLeft() {
+    this.rotateBy(-ROTATE_STEP);
+  },
+  rotateRight() {
+    this.rotateBy(ROTATE_STEP);
+  },
+  /** Current rotation in degrees, 0–359. */
+  angleDeg() {
+    return Math.round((((s.angle % TAU) + TAU) % TAU) * (180 / Math.PI)) % 360;
   },
 };
