@@ -28,4 +28,4 @@ curl -s https://bitcoin.ninja/ln-replay-data/channel_updates.bin | python3 extra
 python3 daily_fees_recv.py archive.npz ../../explorer/datasets/fee_daily_gossip_archive.csv gossip-archive
 ```
 
-This archive is ordered by receive time, so `daily_fees_recv.py` (low memory, no global sort) builds each day's state from the updates *received* before 00:00 UTC; the other definitions are identical. Current file: 31 Oct 2024 to 28 Jul 2026, 636 days, no gaps.
+This archive is ordered by receive time, so `daily_fees_recv.py` (low memory, no global sort) builds each day's state from the updates *received* before 00:00 UTC; the other definitions are identical. Updates stamped more than a day after their receipt time are ignored. Current file: 31 Oct 2024 to 28 Jul 2026, 636 days, no gaps (built before that filter was added; future-stamped updates are a negligible share).

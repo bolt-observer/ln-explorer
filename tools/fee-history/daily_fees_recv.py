@@ -21,7 +21,10 @@ while j < N:
     if k > j:
         sl = slice(j, k); o = np.argsort(ts[sl], kind='stable')
         ki = kidx[sl][o]; tt = ts[sl][o]
-        m = tt >= S_ts[ki]
+        # Drop updates stamped more than a day after receipt (fast clocks): they would
+        # otherwise block later valid updates for that half-channel.
+        rr = recv[sl][o].astype(np.int64)
+        m = (tt >= S_ts[ki]) & (tt.astype(np.int64) <= rr + 86400)
         ki = ki[m]; S_ts[ki] = tt[m]; S_dis[ki] = (fl[sl][o][m] & 2) > 0; S_ppm[ki] = ppm[sl][o][m]; S_base[ki] = base[sl][o][m]
         j = k
     act = (S_ts.astype(np.int64) >= t - 14 * 86400) & (S_ts > 0) & ~S_dis
