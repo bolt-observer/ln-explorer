@@ -599,7 +599,8 @@ async function renderNode(root, pubkey) {
         <span>Page ${channels.page} of ${channels.pages}</span>
         <button class="btn ghost" id="next" type="button" ${channels.page >= channels.pages ? "disabled" : ""}>Next</button>
       </div>
-    </div>`;
+    </div>
+    <div class="card" id="node-history"><h2>History</h2><p class="hint">Loading events…</p></div>`;
   document.getElementById("path-form").onsubmit = async (event) => {
     event.preventDefault();
     const source = document.getElementById("path-from").value.trim();
@@ -618,6 +619,7 @@ async function renderNode(root, pubkey) {
   };
   document.getElementById("prev").onclick = () => go(`/node/${pubkey}?page=${channels.page - 1}`);
   document.getElementById("next").onclick = () => go(`/node/${pubkey}?page=${channels.page + 1}`);
+  fillNodeHistory(pubkey);
 }
 
 function policyBlock(side) {
@@ -825,6 +827,250 @@ function historyNote(history) {
   return history.notes || "";
 }
 
+// --- Change events, flows, and rankings ------------------------------------
+
+const EVENT_KIND_LABELS = {
+  channel_open: "opened",
+  channel_reappeared: "re-announced",
+  channel_close: "closed or pruned",
+  policy_fee: "fee change",
+  alias: "alias",
+  color: "color",
+  addresses: "addresses",
+};
+
+const CHANNEL_EVENT_KINDS = new Set(["channel_open", "channel_reappeared", "channel_close"]);
+
+function eventRow(event) {
+  const label = EVENT_KIND_LABELS[event.kind] || event.kind;
+  const tone = event.kind === "channel_close" ? "close" : CHANNEL_EVENT_KINDS.has(event.kind) ? "open" : "info";
+  const who = event.pubkey
+    ? `<a href="/node/${event.pubkey}">${esc(event.pubkey_alias || shortKey(event.pubkey))}</a>`
+    : "<span class=\"hint\">network</span>";
+  const peer = event.peer
+    ? ` <span class="hint">↔</span> <a href="/node/${event.peer}">${esc(event.peer_alias || shortKey(event.peer))}</a>`
+    : "";
+  let detail = "";
+  if (event.kind === "policy_fee") {
+    detail = `${esc(event.field)}: ${num(event.old)} → ${num(event.new)}${event.field === "ppm" ? " ppm" : " msat"}`;
+  } else if (CHANNEL_EVENT_KINDS.has(event.kind)) {
+    detail = sats(event.capacity);
+  } else {
+    detail = `${esc(event.old)} → ${esc(event.new)}`;
+  }
+  const channel = event.scid
+    ? `<a class="mono" href="/channel/${event.scid}">${esc(event.short_id)}</a>`
+    : "";
+  return `<li><span class="ev-kind ${tone}">${label}</span><span class="ev-body">${who}${peer} <span class="hint">${detail}</span> ${channel}</span><span class="hint">${when(event.ts)}</span></li>`;
+}
+
+function drawFlows(flows) {
+  const canvas = document.getElementById("flows");
+  if (!canvas) return;
+  const opens = new Map((flows.series.channel_open || []).map((point) => [point.day, point.count]));
+  const closes = new Map((flows.series.channel_close || []).map((point) => [point.day, point.count]));
+  const today = Math.floor(Date.now() / 1000 / 86400) * 86400;
+  const start = today - 89 * 86400;
+  const days = [];
+  for (let day = start; day <= today; day += 86400) days.push(day);
+  const width = canvas.clientWidth || 900;
+  const height = 240;
+  canvas.width = width * devicePixelRatio;
+  canvas.height = height * devicePixelRatio;
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  const padLeft = 52;
+  const padRight = 8;
+  const plotWidth = width - padLeft - padRight;
+  const zero = Math.floor(height / 2);
+  const maxCount = Math.max(1, ...days.map((day) => Math.max(opens.get(day) || 0, closes.get(day) || 0)));
+  const half = Math.max(24, zero - 26);
+  const scale = (count) => (count / maxCount) * half;
+  ctx.font = "11px sans-serif";
+  ctx.fillStyle = "#9aa39c";
+  ctx.strokeStyle = "#2c2c2c";
+  ctx.textAlign = "right";
+  ctx.fillText(num(maxCount, 0), padLeft - 6, 30);
+  ctx.fillText("0", padLeft - 6, zero + 4);
+  ctx.fillText(num(maxCount, 0), padLeft - 6, height - 14);
+  ctx.beginPath();
+  ctx.moveTo(padLeft, zero);
+  ctx.lineTo(width - padRight, zero);
+  ctx.stroke();
+  const barWidth = Math.max(1, plotWidth / days.length - 1);
+  days.forEach((day, index) => {
+    const x = padLeft + (index / days.length) * plotWidth;
+    const openCount = opens.get(day) || 0;
+    const closeCount = closes.get(day) || 0;
+    if (openCount) {
+      ctx.fillStyle = "#1DFEBB";
+      ctx.fillRect(x, zero - scale(openCount), barWidth, scale(openCount));
+    }
+    if (closeCount) {
+      ctx.fillStyle = "#FAD228";
+      ctx.fillRect(x, zero + 1, barWidth, scale(closeCount));
+    }
+  });
+  ctx.fillStyle = "#9aa39c";
+  ctx.textAlign = "left";
+  ctx.fillText("opens ↑", padLeft + 4, 30);
+  ctx.fillText("closes ↓", padLeft + 4, height - 14);
+  ctx.textAlign = "center";
+  days.forEach((day, index) => {
+    const date = new Date(day * 1000);
+    if (date.getUTCDate() <= 3 || index === 0) {
+      const x = padLeft + (index / days.length) * plotWidth;
+      if (x < padLeft + 14 || x > width - padRight - 22) return;
+      ctx.fillText(date.toLocaleDateString(undefined, { month: "short", timeZone: "UTC" }), x, height - 2);
+    }
+  });
+}
+
+function closeTypesBlock(flows) {
+  const reasons = flows.close_reasons || {};
+  const rows = Object.entries(flows.close_types || {})
+    .filter(([, count]) => count > 0)
+    .map(([key, count]) => `<li><span>${esc(reasons[key] || key)}</span><span>${num(count)}</span></li>`);
+  if (!rows.length) return `<p class="hint">No closes recorded in this window yet.</p>`;
+  return `<ul class="side-list">${rows.join("")}</ul>`;
+}
+
+function sparkline(values, width = 64, height = 18) {
+  const points = (values || []).filter((value) => Number.isFinite(Number(value)));
+  if (points.length < 2) {
+    return `<svg class="spark" width="${width}" height="${height}" aria-hidden="true"></svg>`;
+  }
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const pad = 2;
+  const x = (i) => pad + (i / (points.length - 1)) * (width - 2 * pad);
+  const y = (v) => (max === min ? height / 2 : pad + ((v - min) / (max - min)) * (height - 2 * pad));
+  const path = points.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  // A rank that fell (better rank) is drawn in mint.
+  const improved = points[points.length - 1] <= points[0];
+  return `<svg class="spark" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" aria-hidden="true"><polyline points="${path}" fill="none" stroke="${improved ? "#1DFEBB" : "#FAD228"}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+}
+
+function changeCell(value) {
+  if (value === null || value === undefined) return `<td class="chg new">new</td>`;
+  if (value === 0) return `<td class="chg">·</td>`;
+  const up = value > 0;
+  return `<td class="chg ${up ? "up" : "down"}">${up ? "▲" : "▼"} ${Math.abs(value).toLocaleString()}</td>`;
+}
+
+const RANK_METRIC_LABELS = {
+  total_capacity: "Capacity",
+  num_channels: "Channels",
+  betweenness: "Betweenness",
+  betweenness_weighted: "Betweenness (w)",
+  closeness: "Closeness",
+  closeness_weighted: "Closeness (w)",
+  eigenvector: "Eigenvector",
+  eigenvector_weighted: "Eigenvector (w)",
+};
+
+function dayLabel(day) {
+  if (!day) return "";
+  return new Date(Number(day) * 1000).toISOString().slice(0, 10);
+}
+
+function moversList(rows) {
+  if (!rows || !rows.length) return `<p class="hint">Not enough stored days yet.</p>`;
+  return `<ol class="side-list">${rows
+    .map(
+      (row) =>
+        `<li><a href="/node/${row.pubkey}">${esc(row.alias || shortKey(row.pubkey))}</a><span class="chg ${row.change > 0 ? "up" : "down"}">${row.change > 0 ? "▲" : "▼"} ${Math.abs(row.change)} · #${num(row.rank)}</span></li>`
+    )
+    .join("")}</ol>`;
+}
+
+async function renderRankings(root) {
+  const params = new URLSearchParams(location.search);
+  const requested = params.get("metric") || "total_capacity";
+  root.innerHTML = `<p class="hint">Loading rankings…</p>`;
+  const [payload, movers] = await Promise.all([
+    api(`/api/rankings?metric=${encodeURIComponent(requested)}&limit=100`),
+    api(`/api/rankings/movers?metric=${encodeURIComponent(requested)}&days=7&limit=10`).catch(() => null),
+  ]);
+  const metric = payload.metrics.includes(requested) ? requested : "total_capacity";
+  const tabs = payload.metrics
+    .map(
+      (name) =>
+        `<button type="button" data-metric="${name}" class="${name === metric ? "active" : ""}">${esc(RANK_METRIC_LABELS[name] || name)}</button>`
+    )
+    .join("");
+  const formatValue = (value) =>
+    metric === "total_capacity" ? sats(value) : num(value, metric === "num_channels" ? 0 : 3);
+  const isCentrality = metric !== "total_capacity" && metric !== "num_channels";
+  const emptyRow = `<tr><td colspan="7" class="hint">${
+    isCentrality ? "Centrality ranks are still being computed." : "No nodes yet."
+  }</td></tr>`;
+  const rows = payload.objects.length
+    ? payload.objects
+        .map(
+          (entry) => `<tr>
+        <td>${num(entry.rank)}</td>
+        <td class="left"><a href="/node/${entry.pubkey}">${esc(entry.alias || shortKey(entry.pubkey))}</a></td>
+        <td>${formatValue(entry.value)}</td>
+        ${changeCell(entry.rank_change_1d)}
+        ${changeCell(entry.rank_change_7d)}
+        ${changeCell(entry.rank_change_30d)}
+        <td>${sparkline(entry.history)}</td>
+      </tr>`
+        )
+        .join("")
+    : emptyRow;
+  const range = payload.days && payload.days.first
+    ? `stored days: ${dayLabel(payload.days.first)} – ${dayLabel(payload.days.last)}`
+    : "no stored days yet";
+  root.innerHTML = `
+    <div class="title-row"><h1>Rankings</h1></div>
+    <p class="hint">The live top list per metric. Change columns compare against the daily snapshot of ranks (positive = climbed); “new” means the node was outside the stored top that day. ${esc(range)}.</p>
+    <div class="seg rank-tabs" role="group" aria-label="Metric">${tabs}</div>
+    <div class="card"><table>
+      <thead><tr><th>Rank</th><th class="left">Node</th><th>Value</th><th>1d</th><th>7d</th><th>30d</th><th>90 days</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <div class="two">
+      <section class="card"><h2>Climbers (7 days)</h2>${moversList(movers && movers.climbers)}</section>
+      <section class="card"><h2>Fallers (7 days)</h2>${moversList(movers && movers.fallers)}</section>
+    </div>`;
+  root.querySelectorAll("[data-metric]").forEach((button) => {
+    button.onclick = () => go(`/rankings?metric=${button.dataset.metric}`);
+  });
+}
+
+async function fillNodeHistory(pubkey) {
+  const host = document.getElementById("node-history");
+  if (!host) return;
+  try {
+    const [events, ranks] = await Promise.all([
+      api(`/api/nodes/${pubkey}/events?limit=100`),
+      api(`/api/nodes/${pubkey}/ranks?days=90`),
+    ]);
+    const list = events.events.length
+      ? `<ul class="event-list">${events.events.slice(0, 30).map(eventRow).join("")}</ul>`
+      : `<p class="hint">No recorded events yet. Opens, closes, fee changes, and alias or address changes appear here after the first snapshot diff.</p>`;
+    const sparkMetrics = Object.entries(ranks.series || {}).filter(([, points]) => points.length > 1);
+    const sparks = sparkMetrics.length
+      ? `<div class="rank-sparks">${sparkMetrics
+          .map(
+            ([metric, points]) =>
+              `<div class="rank-spark"><span class="hint">${esc(RANK_METRIC_LABELS[metric] || metric)}</span>${sparkline(
+                points.map((point) => point.rank)
+              )}<span class="hint">#${num(points[points.length - 1].rank)}</span></div>`
+          )
+          .join("")}</div>`
+      : "";
+    host.innerHTML = `<h2>History</h2>${list}${sparks}`;
+  } catch (error) {
+    host.innerHTML = `<h2>History</h2><p class="hint">${esc(error.message)}</p>`;
+  }
+}
+
 function btcPriceText(rates) {
   if (!rates || !rates.USD) return "—";
   const parts = [`$${num(rates.USD, 0)}`];
@@ -844,7 +1090,12 @@ async function renderStats(root) {
   const params = new URLSearchParams(location.search);
   const range = ["1y", "3y", "all"].includes(params.get("range")) ? params.get("range") : "all";
   const currency = params.get("cap") === "usd" ? "usd" : "btc";
-  const [stats, history] = await Promise.all([api("/api/stats"), api(`/api/history?range=${range}`)]);
+  const [stats, history, flows, recent] = await Promise.all([
+    api("/api/stats"),
+    api(`/api/history?range=${range}`),
+    api("/api/flows?days=90").catch(() => null),
+    api("/api/events?limit=60").catch(() => ({ events: [] })),
+  ]);
   const reported = stats.reported || {};
   const latestNet = stats.network_latest || {};
   const fees = stats.fees || {};
@@ -886,6 +1137,46 @@ async function renderStats(root) {
       <p class="chart-legend hint"><span class="legend-line solid"></span> mempool.space&nbsp;&nbsp;<span class="legend-line dashed"></span> this explorer (rapid gossip sync snapshot)</p>
       <p class="hint">${esc(historyNote(history))}</p>
     </section>
+    ${
+      flows
+        ? `<section class="card" style="margin-bottom:0.8rem">
+      <div class="chart-head">
+        <h2>Channel opens and closes</h2>
+        <span class="hint">last 90 days · from this explorer's snapshot diffs</span>
+      </div>
+      ${
+        flows.accumulating
+          ? `<p class="hint">Opens and closes start accumulating from the first snapshot diff (${flows.events_since ? dayLabel(flows.events_since) : "next refresh"}). Snapshots refresh every 3 hours.</p>`
+          : `<canvas class="chart flows" id="flows"></canvas>
+      <p class="chart-legend hint"><span class="legend-line solid mint"></span> opens&nbsp;&nbsp;<span class="legend-line solid yellow"></span> closes (closed or pruned from gossip)</p>`
+      }
+      <div class="kv three">
+        <div><div class="k">Opens 7d</div><div class="v">${num((stats.flows_7d || {}).opens)}</div></div>
+        <div><div class="k">Closes 7d</div><div class="v">${num((stats.flows_7d || {}).closes)}</div></div>
+        <div><div class="k">Net channels 7d</div><div class="v">${(stats.flows_7d || {}).net_channels > 0 ? "+" : ""}${num((stats.flows_7d || {}).net_channels)}</div></div>
+      </div>
+      <div class="two">
+        <div>
+          <h3>Close reasons in window</h3>
+          ${closeTypesBlock(flows)}
+          <p class="hint">Close reasons come from mempool.space, whose Lightning indexer stopped around 2026-08-30; closes after that usually show “unknown / not yet indexed”.</p>
+        </div>
+        <div>
+          <h3>Recent opens and closes</h3>
+          ${
+            recent.events.filter((event) => CHANNEL_EVENT_KINDS.has(event.kind)).length
+              ? `<ul class="event-list">${recent.events
+                  .filter((event) => CHANNEL_EVENT_KINDS.has(event.kind))
+                  .slice(0, 20)
+                  .map(eventRow)
+                  .join("")}</ul>`
+              : `<p class="hint">No opens or closes recorded yet.</p>`
+          }
+        </div>
+      </div>
+    </section>`
+        : ""
+    }
     <section class="card" style="margin-bottom:0.8rem">
       <h2>Routing fees across ${num(feeRate.count)} directed policies</h2>
       <table>
@@ -911,6 +1202,7 @@ async function renderStats(root) {
     </div>
     <p class="hint" style="margin-top:0.8rem">Median base fee ${num(stats.median_base_fee_msat)} msat. Disabled both ways: ${num(stats.disabled_channels)} channels. Capacity known for ${(stats.capacity_coverage * 100).toFixed(0)}% of channels. Snapshot ${when(stats.graph_timestamp)}.</p>`;
   drawHistory(history, { currency });
+  if (flows && !flows.accumulating) drawFlows(flows);
   root.querySelectorAll("[data-range]").forEach((button) => {
     button.onclick = () => go(`/stats?range=${button.dataset.range}&cap=${currency}`);
   });
@@ -940,6 +1232,11 @@ async function draw() {
     if (parts[0] === "nodes") {
       setNav("nodes");
       await renderNodes(app);
+      return;
+    }
+    if (parts[0] === "rankings") {
+      setNav("rankings");
+      await renderRankings(app);
       return;
     }
     if (parts[0] === "stats") {

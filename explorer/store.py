@@ -94,6 +94,53 @@ SORT_FIELDS = {
     "eigenvector_weighted_rank",
 }
 
+# --- Change events (snapshot diffs) ---------------------------------------
+#
+# One refresh diffs the incoming snapshot against the previous graph and
+# records opens/closes/fee changes plus node-field changes from enrichment.
+# Individual policy_fee rows are only kept for a month (there are many),
+# everything else for a year; the daily aggregate outlives both so charts
+# survive pruning.
+# A scid whose funding block is within NEW_CHANNEL_BLOCKS of the newest
+# block in the snapshot is a fresh open; anything older was re-announced.
+NEW_CHANNEL_BLOCKS = 4032
+EVENT_RETENTION_SECONDS = 365 * 86400
+POLICY_FEE_RETENTION_SECONDS = 30 * 86400
+EVENT_HARD_CAP = 400_000
+EVENT_DAILY_RETENTION_SECONDS = int(5 * 365.25 * 86400)
+FLAP_SUPPRESS_SECONDS = 24 * 3600.0
+# mempool.space backends lag each other, so alias/color can bounce between an
+# old and a new value for days; a reversal within this window is not an event.
+FIELD_FLAP_SUPPRESS_SECONDS = 7 * 86400.0
+CAPACITY_EVENT_KINDS = frozenset({"channel_open", "channel_reappeared", "channel_close"})
+
+# mempool's closing codes: 1 unknown, 2 mutual close, 3 force close,
+# 4 force close with penalty.
+CLOSE_REASONS = {1: "unknown", 2: "mutual close", 3: "force close", 4: "force close with penalty"}
+CLOSE_MAX_LOOKUPS = 6
+CLOSE_RETRY_SECONDS = 12 * 3600.0
+
+# --- Rank history -----------------------------------------------------------
+RANK_METRICS = (
+    "total_capacity",
+    "num_channels",
+    "betweenness",
+    "betweenness_weighted",
+    "closeness",
+    "closeness_weighted",
+    "eigenvector",
+    "eigenvector_weighted",
+)
+CENTRALITY_METRICS = RANK_METRICS[2:]
+RANK_HISTORY_RETENTION_SECONDS = 365 * 86400
+RANK_SPARKLINE_DAYS = 90
+
+
+def _utc_day(ts: float | None = None) -> int:
+    """Midnight UTC of ``ts`` as an epoch second (same key the prices table uses)."""
+    moment = time.time() if ts is None else ts
+    return int(moment // 86400) * 86400
+
 
 class _Directed:
     """Compare so that ``reverse`` flips order without moving missing rows."""
@@ -314,6 +361,16 @@ class Store:
         self.source = ""
         self.source_detail = ""
         self.last_error = ""
+        # Change events buffered during one refresh; flushed to sqlite in one
+        # executemany, never kept across refreshes.
+        self.events_since: int | None = None
+        self._pending_events: list[dict] = []
+        self._pending_daily: list[tuple[str, int, int]] = []
+        # Last recorded address change per pubkey (normalized sets), used to
+        # suppress flapping between two sources inside 24h.
+        self._last_address_flip: dict[str, tuple[frozenset, frozenset, float]] = {}
+        self._last_field_change: dict[tuple[str, str], tuple[str, str, float]] = {}
+        self._rank_day_written: int | None = None
         self._conn = None
 
     def open(self) -> None:
@@ -392,6 +449,51 @@ class Store:
                 usd REAL,
                 eur REAL
             );
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY,
+                ts INTEGER,
+                kind TEXT,
+                pubkey TEXT,
+                peer TEXT,
+                scid INTEGER,
+                field TEXT,
+                old TEXT,
+                new TEXT,
+                capacity INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS events_ts ON events (ts);
+            CREATE INDEX IF NOT EXISTS events_pubkey_ts ON events (pubkey, ts);
+            CREATE INDEX IF NOT EXISTS events_scid ON events (scid);
+            CREATE INDEX IF NOT EXISTS events_kind_ts ON events (kind, ts);
+            CREATE TABLE IF NOT EXISTS event_daily (
+                day INTEGER,
+                kind TEXT,
+                count INTEGER,
+                capacity INTEGER,
+                PRIMARY KEY (day, kind)
+            );
+            CREATE TABLE IF NOT EXISTS channel_closures (
+                scid INTEGER PRIMARY KEY,
+                closed_seen_ts INTEGER,
+                capacity INTEGER,
+                node1 TEXT,
+                node2 TEXT,
+                closing_reason INTEGER,
+                closing_date TEXT,
+                closing_txid TEXT,
+                mempool_status INTEGER,
+                lookups INTEGER,
+                last_lookup REAL
+            );
+            CREATE TABLE IF NOT EXISTS rank_history (
+                day INTEGER,
+                metric TEXT,
+                pubkey TEXT,
+                rank INTEGER,
+                value REAL,
+                PRIMARY KEY (day, metric, pubkey)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS rank_history_node ON rank_history (pubkey, metric, day);
             """
         )
         snapshot_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(snapshots)")}
@@ -502,6 +604,12 @@ class Store:
             self.graph_timestamp = int(meta.get("graph_timestamp") or 0)
             self.source = meta.get("source") or ""
             self.source_detail = meta.get("source_detail") or ""
+            self.events_since = (
+                int(meta["events_since"]) if meta.get("events_since") else None
+            )
+            self._rank_day_written = (
+                int(meta["rank_history_day"]) if meta.get("rank_history_day") else None
+            )
             self.last_history_fetch = float(meta.get("last_mempool_history_fetch") or 0)
             self.last_price_fetch = float(meta.get("last_mempool_price_fetch") or 0)
             if meta.get("network_stats"):
@@ -683,8 +791,29 @@ class Store:
         self.derived = derived
 
     def install_graph(self, graph: ParsedGraph, source: str, detail: str) -> None:
-        """Replace topology, keeping previously learned aliases and capacities."""
+        """Replace topology, keeping previously learned aliases and capacities.
+
+        When a previous graph is loaded and the snapshot moved, the old and
+        new graphs are diffed first (still inside the lock, O(channels), no
+        per-channel sqlite access) and the change events are flushed at once.
+        """
         with self._lock:
+            now = int(time.time())
+            if (self.channels or self.nodes) and graph.timestamp != self.graph_timestamp:
+                events, disabled_flips, enabled_flips = self._diff_events(graph, now)
+                self._pending_events.extend(events)
+                if disabled_flips:
+                    self._pending_daily.append(("channel_disabled", disabled_flips, 0))
+                if enabled_flips:
+                    self._pending_daily.append(("channel_enabled", enabled_flips, 0))
+                if self.events_since is None and self._conn is not None:
+                    self.events_since = now
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('events_since', ?)",
+                        (str(now),),
+                    )
+                if self._conn is not None:
+                    self._flush_events()
             previous = self.nodes
             nodes: dict[str, NodeRecord] = {}
             for pubkey, parsed in graph.nodes.items():
@@ -734,18 +863,716 @@ class Store:
             self.last_error = ""
             self._reindex()
 
+    def _diff_events(self, graph: ParsedGraph, now: int) -> tuple[list[dict], int, int]:
+        """Diff the incoming snapshot against the live graph (lock held).
+
+        Returns event rows plus disabled/enabled flip counts. Disabled flips
+        are counted per refresh but not stored as individual events.
+        """
+        events: list[dict] = []
+        disabled_flips = enabled_flips = 0
+        if self.channels:
+            old_channels = self.channels
+            highest_block = max((scid >> 40 for scid in graph.channels), default=0)
+            fresh_from = highest_block - NEW_CHANNEL_BLOCKS
+            for scid, channel in graph.channels.items():
+                if scid in old_channels:
+                    continue
+                kind = "channel_open" if (scid >> 40) >= fresh_from else "channel_reappeared"
+                events.append(
+                    {
+                        "ts": now,
+                        "kind": kind,
+                        "pubkey": channel.node1,
+                        "peer": channel.node2,
+                        "scid": scid,
+                        "field": None,
+                        "old": None,
+                        "new": None,
+                        "capacity": channel.capacity,
+                    }
+                )
+            for scid, old in old_channels.items():
+                if scid in graph.channels:
+                    continue
+                events.append(
+                    {
+                        "ts": now,
+                        "kind": "channel_close",
+                        "pubkey": old.node1,
+                        "peer": old.node2,
+                        "scid": scid,
+                        "field": None,
+                        "old": None,
+                        "new": None,
+                        "capacity": old.capacity,
+                    }
+                )
+            for scid, channel in graph.channels.items():
+                old = old_channels.get(scid)
+                if old is None:
+                    continue
+                for owner, before, after in (
+                    (channel.node1, old.policy1, channel.policy1),
+                    (channel.node2, old.policy2, channel.policy2),
+                ):
+                    if before is None or after is None:
+                        continue
+                    peer = channel.node2 if owner == channel.node1 else channel.node1
+                    capacity = channel.capacity or old.capacity
+                    if before.disabled != after.disabled:
+                        if after.disabled:
+                            disabled_flips += 1
+                        else:
+                            enabled_flips += 1
+                    if before.ppm != after.ppm:
+                        events.append(
+                            {
+                                "ts": now,
+                                "kind": "policy_fee",
+                                "pubkey": owner,
+                                "peer": peer,
+                                "scid": scid,
+                                "field": "ppm",
+                                "old": str(before.ppm),
+                                "new": str(after.ppm),
+                                "capacity": capacity,
+                            }
+                        )
+                    if before.base_msat != after.base_msat:
+                        events.append(
+                            {
+                                "ts": now,
+                                "kind": "policy_fee",
+                                "pubkey": owner,
+                                "peer": peer,
+                                "scid": scid,
+                                "field": "base",
+                                "old": str(before.base_msat),
+                                "new": str(after.base_msat),
+                                "capacity": capacity,
+                            }
+                        )
+        # Node fields come from LND/file snapshots and mempool enrichment, not
+        # from RGS v1; record a change only when both values are non-empty.
+        for pubkey, parsed in graph.nodes.items():
+            old = self.nodes.get(pubkey)
+            if old is None:
+                continue
+            alias = getattr(parsed, "alias", "") or ""
+            if alias and old.alias and alias != old.alias and not self._field_flaps(pubkey, "alias", old.alias, alias, now):
+                events.append(
+                    {
+                        "ts": now,
+                        "kind": "alias",
+                        "pubkey": pubkey,
+                        "peer": None,
+                        "scid": None,
+                        "field": "alias",
+                        "old": old.alias,
+                        "new": alias,
+                        "capacity": None,
+                    }
+                )
+            color = getattr(parsed, "color", "") or ""
+            if color and old.color and color != old.color and not self._field_flaps(pubkey, "color", old.color, color, now):
+                events.append(
+                    {
+                        "ts": now,
+                        "kind": "color",
+                        "pubkey": pubkey,
+                        "peer": None,
+                        "scid": None,
+                        "field": "color",
+                        "old": old.color,
+                        "new": color,
+                        "capacity": None,
+                    }
+                )
+            if parsed.addresses and old.addresses:
+                event = self._address_event(pubkey, old.addresses, parsed.addresses, now)
+                if event is not None:
+                    events.append(event)
+        return events, disabled_flips, enabled_flips
+
+    def _field_flaps(self, pubkey: str, field_name: str, old: str, new: str, ts: float) -> bool:
+        """True when old->new reverses this node's last recorded change recently."""
+        key = (pubkey, field_name)
+        previous = self._last_field_change.get(key)
+        if (
+            previous is not None
+            and ts - previous[2] < FIELD_FLAP_SUPPRESS_SECONDS
+            and {previous[0], previous[1]} == {old, new}
+        ):
+            # A reversal, or the same change again after a reversal.
+            return True
+        self._last_field_change[key] = (old, new, float(ts))
+        return False
+
+    @staticmethod
+    def _normalized_addresses(addresses: list[str]) -> frozenset[str]:
+        return frozenset(
+            address.strip().lower() for address in addresses if address and address.strip()
+        )
+
+    def _address_event(
+        self, pubkey: str, old_addresses: list[str], new_addresses: list[str], ts: int
+    ) -> dict | None:
+        """An addresses change, unless it reverses a recent one (flap guard)."""
+        old_set = self._normalized_addresses(old_addresses)
+        new_set = self._normalized_addresses(new_addresses)
+        if not old_set or not new_set or old_set == new_set:
+            return None
+        previous = self._last_address_flip.get(pubkey)
+        if (
+            previous is not None
+            and ts - previous[2] < FLAP_SUPPRESS_SECONDS
+            and previous[0] == new_set
+            and previous[1] == old_set
+        ):
+            return None
+        self._last_address_flip[pubkey] = (old_set, new_set, float(ts))
+        return {
+            "ts": ts,
+            "kind": "addresses",
+            "pubkey": pubkey,
+            "peer": None,
+            "scid": None,
+            "field": "addresses",
+            "old": json.dumps(sorted(old_set)),
+            "new": json.dumps(sorted(new_set)),
+            "capacity": None,
+        }
+
+    def _flush_events(self) -> None:
+        """Write the buffered events in one pass, then apply retention."""
+        assert self._conn is not None
+        conn = self._conn
+        now = int(time.time())
+        if self._pending_events or self._pending_daily:
+            conn.executemany(
+                "INSERT INTO events (ts, kind, pubkey, peer, scid, field, old, new, capacity)"
+                " VALUES (:ts, :kind, :pubkey, :peer, :scid, :field, :old, :new, :capacity)",
+                self._pending_events,
+            )
+            closures = [
+                (event["scid"], event["ts"], event["capacity"], event["pubkey"], event["peer"])
+                for event in self._pending_events
+                if event["kind"] == "channel_close"
+            ]
+            if closures:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO channel_closures"
+                    " (scid, closed_seen_ts, capacity, node1, node2, lookups, last_lookup)"
+                    " VALUES (?,?,?,?,?,0,0)",
+                    closures,
+                )
+            aggregates: dict[tuple[int, str], list[int]] = {}
+            for kind, count, capacity in self._pending_daily:
+                slot = aggregates.setdefault((_utc_day(now), kind), [0, 0])
+                slot[0] += count
+                slot[1] += capacity or 0
+            for event in self._pending_events:
+                slot = aggregates.setdefault(
+                    (event["ts"] - event["ts"] % 86400, event["kind"]), [0, 0]
+                )
+                slot[0] += 1
+                if event["kind"] in CAPACITY_EVENT_KINDS:
+                    slot[1] += int(event.get("capacity") or 0)
+            conn.executemany(
+                "INSERT INTO event_daily (day, kind, count, capacity) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(day, kind) DO UPDATE SET"
+                " count = count + excluded.count, capacity = capacity + excluded.capacity",
+                [
+                    (day, kind, slot[0], slot[1])
+                    for (day, kind), slot in sorted(aggregates.items())
+                ],
+            )
+            self._pending_events = []
+            self._pending_daily = []
+        self._prune_events(now)
+        conn.commit()
+
+    def _prune_events(self, now: int) -> None:
+        """Drop old events, keep the daily aggregate for charts."""
+        assert self._conn is not None
+        conn = self._conn
+        conn.execute("DELETE FROM events WHERE ts < ?", (now - EVENT_RETENTION_SECONDS,))
+        conn.execute(
+            "DELETE FROM events WHERE kind = 'policy_fee' AND ts < ?",
+            (now - POLICY_FEE_RETENTION_SECONDS,),
+        )
+        total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        if total > EVENT_HARD_CAP:
+            conn.execute(
+                "DELETE FROM events WHERE id <= "
+                "(SELECT MIN(id) FROM (SELECT id FROM events ORDER BY id DESC LIMIT ?))",
+                (EVENT_HARD_CAP,),
+            )
+        conn.execute(
+            "DELETE FROM event_daily WHERE day < ?", (now - EVENT_DAILY_RETENTION_SECONDS,)
+        )
+
+    def query_events(
+        self,
+        kind: str | None = None,
+        pubkey: str | None = None,
+        scid: int | None = None,
+        limit: int = 100,
+        before: int | None = None,
+    ) -> list[dict]:
+        """Change events, newest first, with aliases and short channel ids."""
+        assert self._conn is not None
+        clauses: list[str] = []
+        params: list = []
+        if kind:
+            clauses.append("kind = ?")
+            params.append(kind)
+        if pubkey:
+            clauses.append("(pubkey = ? OR peer = ?)")
+            params.extend([pubkey, pubkey])
+        if scid is not None:
+            clauses.append("scid = ?")
+            params.append(scid)
+        if before:
+            clauses.append("ts < ?")
+            params.append(int(before))
+        sql = "SELECT * FROM events"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 500)))
+        with self._lock:
+            rows = [dict(row) for row in self._conn.execute(sql, params)]
+        for row in rows:
+            node = self.nodes.get(row.get("pubkey") or "")
+            peer = self.nodes.get(row.get("peer") or "")
+            row["pubkey_alias"] = node.alias if node else ""
+            row["peer_alias"] = peer.alias if peer else ""
+            row["short_id"] = format_scid(row["scid"]) if row.get("scid") else ""
+        return rows
+
+    def flows_payload(self, days: int = 90, now: float | None = None) -> dict:
+        """Daily open/close series, close-type breakdown, and accumulation state."""
+        assert self._conn is not None
+        moment = int(time.time() if now is None else now)
+        days = max(1, min(int(days), 365))
+        first_day = _utc_day(moment) - (days - 1) * 86400
+        with self._lock:
+            slots: dict[str, dict[int, dict]] = {}
+            for row in self._conn.execute(
+                "SELECT day, kind, count, capacity FROM event_daily WHERE day >= ? ORDER BY day ASC",
+                (first_day,),
+            ):
+                slots.setdefault(row["kind"], {})[int(row["day"])] = {
+                    "count": int(row["count"] or 0),
+                    "capacity": int(row["capacity"] or 0),
+                }
+            close_types: dict[str, int] = {str(reason): 0 for reason in CLOSE_REASONS}
+            close_types.update({"pending": 0, "gave_up": 0})
+            for row in self._conn.execute(
+                "SELECT closing_reason,"
+                " SUM(CASE WHEN lookups >= ? THEN 1 ELSE 0 END) AS gave_up,"
+                " COUNT(*) AS total FROM channel_closures"
+                " WHERE closed_seen_ts >= ? GROUP BY closing_reason",
+                (CLOSE_MAX_LOOKUPS, moment - days * 86400),
+            ):
+                reason = row["closing_reason"]
+                total = int(row["total"] or 0)
+                if reason is None:
+                    gave_up = int(row["gave_up"] or 0)
+                    close_types["gave_up"] += gave_up
+                    close_types["pending"] += total - gave_up
+                else:
+                    close_types[str(int(reason))] += total
+            series = {
+                kind: [dict(day=day, **slot) for day, slot in sorted(per_day.items())]
+                for kind, per_day in slots.items()
+            }
+        return {
+            "days": days,
+            "series": series,
+            "close_types": close_types,
+            "close_reasons": {
+                str(reason): label for reason, label in CLOSE_REASONS.items()
+            }
+            | {"pending": "pending lookup", "gave_up": "unknown (lookup gave up)"},
+            "events_since": self.events_since,
+            "accumulating": self.events_since is None,
+        }
+
+    def flows_7d(self, now: float | None = None) -> dict:
+        """Seven-day open/close/fee-change totals from the daily aggregate."""
+        assert self._conn is not None
+        moment = int(time.time() if now is None else now)
+        first_day = _utc_day(moment) - 6 * 86400
+        with self._lock:
+            rows = {
+                row["kind"]: (int(row["count"] or 0), int(row["capacity"] or 0))
+                for row in self._conn.execute(
+                    "SELECT kind, SUM(count) AS count, SUM(capacity) AS capacity"
+                    " FROM event_daily WHERE day >= ? AND kind IN"
+                    " ('channel_open', 'channel_close', 'policy_fee') GROUP BY kind",
+                    (first_day,),
+                )
+            }
+        opens, opened_capacity = rows.get("channel_open", (0, 0))
+        closes, closed_capacity = rows.get("channel_close", (0, 0))
+        fee_changes = rows.get("policy_fee", (0, 0))[0]
+        return {
+            "opens": opens,
+            "closes": closes,
+            "net_channels": opens - closes,
+            "opened_capacity": opened_capacity,
+            "closed_capacity": closed_capacity,
+            "fee_changes": fee_changes,
+        }
+
+    # --- Channel closure lookups -------------------------------------------
+
+    def closure_candidates(self, limit: int, now: float | None = None) -> list[dict]:
+        """Unresolved closures due for another mempool lookup, newest first."""
+        assert self._conn is not None
+        moment = time.time() if now is None else now
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT scid, lookups, last_lookup FROM channel_closures"
+                " WHERE closing_reason IS NULL AND lookups < ?"
+                " AND (last_lookup IS NULL OR last_lookup = 0 OR last_lookup <= ?)"
+                " ORDER BY closed_seen_ts DESC LIMIT ?",
+                (CLOSE_MAX_LOOKUPS, moment - CLOSE_RETRY_SECONDS, max(0, int(limit))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_closure(self, scid: int, fields: dict) -> None:
+        """Persist one closure-lookup result (partial updates allowed)."""
+        assert self._conn is not None
+        if not fields:
+            return
+        assignments = ", ".join(f"{column} = :{column}" for column in fields)
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE channel_closures SET {assignments} WHERE scid = :scid",
+                {**fields, "scid": scid},
+            )
+            self._conn.commit()
+
+    def closure_rows(self, limit: int = 50) -> list[dict]:
+        """Newest closures with their resolution state, for debugging."""
+        assert self._conn is not None
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM channel_closures ORDER BY closed_seen_ts DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # --- Rank history --------------------------------------------------------
+
+    def record_rank_history(self, top: int, now: float | None = None) -> int:
+        """Store today's top ranks once per UTC day (after metrics ran).
+
+        When the centrality metrics are not ready yet, only capacity and
+        channel counts are stored for that day.
+        """
+        assert self._conn is not None
+        day = _utc_day(now)
+        with self._lock:
+            if self._rank_day_written == day:
+                return 0
+            rows = self._rank_rows(day, max(1, int(top)))
+            if rows:
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO rank_history (day, metric, pubkey, rank, value)"
+                    " VALUES (?,?,?,?,?)",
+                    rows,
+                )
+            self._conn.execute(
+                "DELETE FROM rank_history WHERE day < ?",
+                (day - RANK_HISTORY_RETENTION_SECONDS,),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('rank_history_day', ?)",
+                (str(day),),
+            )
+            self._conn.commit()
+            self._rank_day_written = day
+        return len(rows)
+
+    def _rank_rows(self, day: int, top: int) -> list[tuple]:
+        """Today's rows: capacity/channels descending, centrality by its rank."""
+        rows: list[tuple] = []
+        for metric in ("total_capacity", "num_channels"):
+            entries = sorted(
+                (
+                    (info[metric], pubkey)
+                    for pubkey, info in self.derived.items()
+                    if info.get("num_channels") and info.get(metric) is not None
+                ),
+                key=lambda item: (-item[0], item[1]),
+            )
+            rows.extend(
+                (day, metric, pubkey, index, float(value))
+                for index, (value, pubkey) in enumerate(entries[:top], start=1)
+            )
+        present = set()
+        for metrics in self.metrics.values():
+            present.update(
+                metric
+                for metric in CENTRALITY_METRICS
+                if metrics.get(metric) is not None and metrics.get(f"{metric}_rank") is not None
+            )
+        for metric in sorted(present):
+            entries = sorted(
+                (
+                    (metrics[f"{metric}_rank"], pubkey, metrics[metric])
+                    for pubkey, metrics in self.metrics.items()
+                    if metrics.get(metric) is not None
+                    and metrics.get(f"{metric}_rank") is not None
+                ),
+                key=lambda item: (item[0], item[1]),
+            )
+            rows.extend(
+                (day, metric, pubkey, int(rank), float(value))
+                for rank, pubkey, value in entries[:top]
+            )
+        return rows
+
+    def available_rank_metrics(self) -> list[str]:
+        """Rankings this store can currently serve."""
+        with self._lock:
+            metrics = ["total_capacity", "num_channels"]
+            present = set()
+            for row in self.metrics.values():
+                present.update(
+                    metric for metric in CENTRALITY_METRICS if row.get(metric) is not None
+                )
+            metrics.extend(metric for metric in CENTRALITY_METRICS if metric in present)
+            return metrics
+
+    def current_ranking(self, metric: str, limit: int) -> list[dict]:
+        """Live top list, ordered the same way as the node table."""
+        if metric not in RANK_METRICS:
+            metric = "total_capacity"
+        with self._lock:
+            ordered: list[tuple[int, str, float]] = []
+            if metric in ("total_capacity", "num_channels"):
+                entries = sorted(
+                    (
+                        (info[metric], pubkey)
+                        for pubkey, info in self.derived.items()
+                        if info.get("num_channels") and info.get(metric) is not None
+                    ),
+                    key=lambda item: (-item[0], item[1]),
+                )
+                ordered = [
+                    (index, pubkey, float(value))
+                    for index, (value, pubkey) in enumerate(entries[:limit], start=1)
+                ]
+            else:
+                entries = sorted(
+                    (
+                        (row[f"{metric}_rank"], pubkey, row[metric])
+                        for pubkey, row in self.metrics.items()
+                        if row.get(metric) is not None and row.get(f"{metric}_rank") is not None
+                    ),
+                    key=lambda item: (item[0], item[1]),
+                )
+                ordered = [
+                    (int(rank), pubkey, float(value))
+                    for rank, pubkey, value in entries[:limit]
+                ]
+            result = []
+            for rank, pubkey, value in ordered:
+                node = self.nodes.get(pubkey)
+                result.append(
+                    {
+                        "rank": rank,
+                        "pubkey": pubkey,
+                        "alias": node.alias if node else "",
+                        "value": value,
+                    }
+                )
+            return result
+
+    def _stored_rank_day(self, metric: str, target_day: int) -> int | None:
+        """Newest stored day for a metric at or before ``target_day``."""
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT MAX(day) FROM rank_history WHERE metric = ? AND day <= ?",
+            (metric, target_day),
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def _rank_map(self, metric: str, day: int) -> dict[str, int]:
+        assert self._conn is not None
+        return {
+            row["pubkey"]: int(row["rank"])
+            for row in self._conn.execute(
+                "SELECT pubkey, rank FROM rank_history WHERE metric = ? AND day = ?",
+                (metric, day),
+            )
+        }
+
+    def rankings_payload(self, metric: str, limit: int, now: float | None = None) -> dict:
+        """Current top list with 1d/7d/30d rank changes and sparkline history."""
+        assert self._conn is not None
+        if metric not in RANK_METRICS:
+            metric = "total_capacity"
+        today = _utc_day(now)
+        with self._lock:
+            objects = self.current_ranking(metric, limit)
+            history: dict[str, list[int]] = defaultdict(list)
+            for row in self._conn.execute(
+                "SELECT pubkey, day, rank FROM rank_history WHERE metric = ? AND day >= ?"
+                " ORDER BY day ASC",
+                (metric, today - RANK_SPARKLINE_DAYS * 86400),
+            ):
+                history[row["pubkey"]].append(int(row["rank"]))
+            span_days = {}
+            for span in (1, 7, 30):
+                day = self._stored_rank_day(metric, today - span * 86400)
+                span_days[span] = (day, self._rank_map(metric, day)) if day is not None else (None, {})
+            stored = self._conn.execute(
+                "SELECT MIN(day) AS first, MAX(day) AS last FROM rank_history"
+            ).fetchone()
+            metrics = self.available_rank_metrics()
+        for entry in objects:
+            entry["history"] = history.get(entry["pubkey"], [])
+            for span in (1, 7, 30):
+                _day, ranks = span_days[span]
+                previous = ranks.get(entry["pubkey"])
+                # Positive means the node climbed (its rank number dropped).
+                entry[f"rank_change_{span}d"] = (
+                    previous - entry["rank"] if previous is not None else None
+                )
+        return {
+            "metric": metric,
+            "metrics": metrics,
+            "days": {"first": stored["first"], "last": stored["last"]},
+            "objects": objects,
+        }
+
+    def ranking_movers(
+        self, metric: str, days: int = 7, limit: int = 20, now: float | None = None
+    ) -> dict:
+        """Biggest climbers and fallers between two stored days."""
+        assert self._conn is not None
+        if metric not in RANK_METRICS:
+            metric = "total_capacity"
+        days = max(1, min(int(days), 365))
+        today = _utc_day(now)
+        with self._lock:
+            latest = self._stored_rank_day(metric, today)
+            reference = self._stored_rank_day(metric, today - days * 86400)
+            empty = {
+                "metric": metric,
+                "days": days,
+                "from_day": reference,
+                "to_day": latest,
+                "climbers": [],
+                "fallers": [],
+            }
+            if latest is None or reference is None or latest <= reference:
+                return empty
+            old_ranks = self._rank_map(metric, reference)
+            new_ranks = self._rank_map(metric, latest)
+            shared = [
+                (old_ranks[pubkey] - rank, pubkey, rank, old_ranks[pubkey])
+                for pubkey, rank in new_ranks.items()
+                if pubkey in old_ranks
+            ]
+            shared.sort(key=lambda item: (-item[0], item[2]))
+
+            def describe(items):
+                described = []
+                for change, pubkey, rank, previous in items:
+                    node = self.nodes.get(pubkey)
+                    described.append(
+                        {
+                            "pubkey": pubkey,
+                            "alias": node.alias if node else "",
+                            "rank": rank,
+                            "previous_rank": previous,
+                            "change": change,
+                        }
+                    )
+                return described
+            return {
+                **empty,
+                "climbers": describe(shared[:limit]),
+                "fallers": describe(sorted(shared, key=lambda item: (item[0], item[2]))[:limit]),
+            }
+
+    def node_rank_history(self, pubkey: str, days: int = 180, now: float | None = None) -> dict:
+        """Per-metric (day, rank) series for one node."""
+        assert self._conn is not None
+        days = max(1, min(int(days), 365 * 2))
+        cutoff = _utc_day(now) - days * 86400
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT metric, day, rank FROM rank_history WHERE pubkey = ? AND day >= ?"
+                " ORDER BY metric ASC, day ASC",
+                (pubkey, cutoff),
+            ).fetchall()
+        series: dict[str, list[dict]] = defaultdict(list)
+        for row in rows:
+            series[row["metric"]].append({"day": int(row["day"]), "rank": int(row["rank"])})
+        return {"pubkey": pubkey, "days": days, "series": dict(series)}
+
     def apply_node_enrichment(self, pubkey: str, fields: dict, stamp: bool = True) -> None:
+        """Record enrichment fields.
+
+        Each alias/color/addresses value that replaces a non-empty old value
+        buffers a change event; save() flushes the buffer once per refresh.
+        """
         with self._lock:
             node = self.nodes.get(pubkey)
             if node is None:
                 node = NodeRecord(pubkey=pubkey)
                 self.nodes[pubkey] = node
+            now = int(time.time())
             if fields.get("alias"):
-                node.alias = str(fields["alias"])
+                alias = str(fields["alias"])
+                if node.alias and alias != node.alias and not self._field_flaps(pubkey, "alias", node.alias, alias, now):
+                    self._pending_events.append(
+                        {
+                            "ts": now,
+                            "kind": "alias",
+                            "pubkey": pubkey,
+                            "peer": None,
+                            "scid": None,
+                            "field": "alias",
+                            "old": node.alias,
+                            "new": alias,
+                            "capacity": None,
+                        }
+                    )
+                node.alias = alias
             if fields.get("color"):
-                node.color = str(fields["color"])
+                color = str(fields["color"])
+                if node.color and color != node.color and not self._field_flaps(pubkey, "color", node.color, color, now):
+                    self._pending_events.append(
+                        {
+                            "ts": now,
+                            "kind": "color",
+                            "pubkey": pubkey,
+                            "peer": None,
+                            "scid": None,
+                            "field": "color",
+                            "old": node.color,
+                            "new": color,
+                            "capacity": None,
+                        }
+                    )
+                node.color = color
             if fields.get("addresses"):
-                node.addresses = list(fields["addresses"])
+                addresses = list(fields["addresses"])
+                if node.addresses:
+                    event = self._address_event(pubkey, node.addresses, addresses, now)
+                    if event is not None:
+                        self._pending_events.append(event)
+                node.addresses = addresses
             if fields.get("country"):
                 node.country = str(fields["country"])
             if fields.get("city"):
@@ -1158,6 +1985,8 @@ class Store:
         assert self._conn is not None
         with self._lock:
             conn = self._conn
+            # Enrichment events buffered during the refresh land here.
+            self._flush_events()
             conn.execute("DELETE FROM channels")
             conn.executemany(
                 """INSERT INTO channels (
@@ -1636,6 +2465,7 @@ class Store:
                 "disabled_channels": aggregates["disabled_channels"],
             },
             "reported": reported,
+            "flows_7d": self.flows_7d(),
             "source": self.source,
             "updated_at": self.updated_at,
             "graph_timestamp": self.graph_timestamp,

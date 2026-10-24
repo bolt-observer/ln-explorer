@@ -34,6 +34,8 @@ class Settings:
     capacity_pages_per_refresh: int = 800
     enrich_rps: float = 3.0
     metrics_samples: int = 64
+    close_lookups_per_refresh: int = 150
+    rank_history_top: int = 200
     lnd_rest_url: str = ""
     lnd_macaroon_hex: str = ""
     lnd_macaroon_path: str = ""
@@ -80,6 +82,8 @@ class Settings:
             capacity_pages_per_refresh=_int("CAPACITY_PAGES_PER_REFRESH", 800),
             enrich_rps=float(os.environ.get("ENRICH_RPS", "3") or "3"),
             metrics_samples=_int("METRICS_SAMPLES", 64),
+            close_lookups_per_refresh=_int("CLOSE_LOOKUPS_PER_REFRESH", 150),
+            rank_history_top=_int("RANK_HISTORY_TOP", 200),
             lnd_rest_url=os.environ.get("LND_REST_URL", "").strip(),
             lnd_macaroon_hex=os.environ.get("LND_MACAROON_HEX", "").strip(),
             lnd_macaroon_path=os.environ.get("LND_MACAROON_PATH", "").strip(),

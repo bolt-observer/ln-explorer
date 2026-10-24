@@ -35,16 +35,19 @@ Betweenness and closeness are sampled (seeded from the snapshot, so a given grap
 
 Every refresh also records one aggregate row of the live graph (channel counts, capacity, and the full fee distribution with Tukey far-out outlier filtering, because a few nodes still announce placeholder fees such as 2147483647 ppm) into sqlite; rows older than three years are pruned.
 
+Change history comes from diffing consecutive snapshots: channel opens (a channel whose funding block is within 4032 blocks of the newest one in the snapshot) are separated from re-announced old channels, closes ("closed or pruned from gossip", keeping capacity and both nodes), per-policy fee changes, and alias/color/address changes from mempool enrichment. Events live in sqlite (fee changes 30 days, everything else a year, hard cap 400k rows) plus a daily aggregate kept for five years so the charts survive pruning. Closes are looked up at mempool.space (`CLOSE_LOOKUPS_PER_REFRESH` per refresh; a close retries at most 6 times, once per 12h; 429 stops the batch) for the closing reason, date, and transaction. mempool's Lightning indexer stopped around 2026-08-30, so closes after that usually show "unknown / not yet indexed". Once per UTC day the top `RANK_HISTORY_TOP` (default 200) nodes per metric are snapshotted into a 365-day rank history, which feeds the /rankings page (rank changes over 1/7/30 days, movers, and sparklines).
+
 ## Pages
 
 - `/` interactive WebGL graph (sigma.js). Click a node or an edge.
 - `/nodes` filterable node table: capacity, fees, protocols, centrality ranks, optional reference node.
 - `/node/<pubkey>` channels, policies, and a shortest-path lookup.
 - `/channel/<scid>` both directions. `blockxindexxoutput` and the numeric id both work.
-- `/stats` gossip totals, fee distribution, multi-year history chart (mempool.space plus own snapshots), top nodes.
+- `/stats` gossip totals, fee distribution, opens/closes from snapshot diffs, multi-year history chart (mempool.space plus own snapshots), top nodes.
+- `/rankings` top nodes per metric with rank changes over 1/7/30 days and the biggest movers.
 - `/search?q=` alias, pubkey, or channel id.
 
-API lives under `/api/` (`/api/health`, `/api/status`, `/api/stats`, `/api/history?range=1y|3y|all`, `/api/snapshots`, `/api/prices`, `/api/graph`, `/api/nodes`, `/api/channels/<id>`, `/api/search`, `/api/path`).
+API lives under `/api/` (`/api/health`, `/api/status`, `/api/stats`, `/api/history?range=1y|3y|all`, `/api/snapshots`, `/api/prices`, `/api/flows?days=90`, `/api/events?kind=&pubkey=&scid=&limit=&before=`, `/api/rankings?metric=&limit=`, `/api/rankings/movers?metric=&days=`, `/api/nodes/<pubkey>/events`, `/api/nodes/<pubkey>/ranks`, `/api/graph`, `/api/nodes`, `/api/channels/<id>`, `/api/search`, `/api/path`).
 
 ## Configuration
 
