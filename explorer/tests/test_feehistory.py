@@ -101,3 +101,21 @@ class DatasetTests(unittest.TestCase):
         self.assertGreaterEqual(first[2], 20000)
         payload = feehistory.history_payload(conn)
         self.assertEqual(payload["series"][0]["source"], "lnresearch")
+
+
+class ArchiveDatasetTests(unittest.TestCase):
+    def test_gossip_archive_dataset_covers_2024_to_2026(self):
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.executescript(feehistory.SCHEMA)
+        feehistory.load_datasets(conn)
+        first, last, count = conn.execute(
+            "SELECT MIN(day), MAX(day), COUNT(*) FROM fee_daily WHERE source = 'gossip-archive'"
+        ).fetchone()
+        self.assertEqual(first, 1730332800)  # 2024-10-31
+        self.assertGreater(last, 1780000000)
+        self.assertGreater(count, 600)
+        sources = [s["source"] for s in feehistory.history_payload(conn)["series"]]
+        self.assertEqual(sources, ["lnresearch", "gossip-archive"])
