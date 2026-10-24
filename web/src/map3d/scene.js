@@ -345,19 +345,35 @@ export function create(container, hooks) {
   }
 
   let down = null;
+  // Pointers currently pressed; a gesture that ever had two (pinch, two-finger
+  // pan) is a camera move, never a click.
+  const pressed = new Set();
+  let multi = false;
   const el = renderer.domElement;
+  const release = (event) => {
+    pressed.delete(event.pointerId);
+    if (!pressed.size) multi = false;
+  };
+  el.addEventListener("pointercancel", (event) => {
+    release(event);
+    down = null;
+  });
   el.addEventListener("pointerdown", (event) => {
+    pressed.add(event.pointerId);
+    if (pressed.size > 1) multi = true;
     down = { x: event.clientX, y: event.clientY, button: event.button };
     st.touched = true;
     st.anim = null;
     kick();
   });
   el.addEventListener("pointerup", (event) => {
+    const wasMulti = multi;
+    release(event);
     if (!down) return;
     const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y);
     const button = down.button;
     down = null;
-    if (button !== 0 || moved > 5) return;
+    if (wasMulti || button !== 0 || moved > 5) return;
     const node = pick(event.clientX, event.clientY);
     if (node) hooks.onClick(node);
     else hooks.onStage();
