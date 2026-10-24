@@ -1,0 +1,33 @@
+# One process serves the site, the API, and the graph refresh thread.
+# Defaults are enough for a first boot: `docker compose up -d --build`.
+
+services:
+  explorer:
+    build: .
+    image: bolt-observer-explorer
+    ports:
+      - "8000:8000"
+    environment:
+      DATA_DIR: /data
+      PORT: "8000"
+      GRAPH_SOURCE: ${GRAPH_SOURCE:-rgs}
+      RGS_URL: ${RGS_URL:-https://rapidsync.lightningdevkit.org/snapshot/0}
+      MEMPOOL_API: ${MEMPOOL_API:-https://mempool.space/api}
+      REFRESH_SECONDS: ${REFRESH_SECONDS:-10800}
+      ENRICH_PER_REFRESH: ${ENRICH_PER_REFRESH:-6000}
+      CAPACITY_PAGES_PER_REFRESH: ${CAPACITY_PAGES_PER_REFRESH:-800}
+      ENRICH_RPS: ${ENRICH_RPS:-3}
+      METRICS_SAMPLES: ${METRICS_SAMPLES:-64}
+      LND_REST_URL: ${LND_REST_URL:-}
+      LND_MACAROON_HEX: ${LND_MACAROON_HEX:-}
+      LND_MACAROON_PATH: ${LND_MACAROON_PATH:-}
+      LND_INSECURE: ${LND_INSECURE:-1}
+      GRAPH_FILE: ${GRAPH_FILE:-}
+      PLAUSIBLE_DOMAIN: ${PLAUSIBLE_DOMAIN:-}
+      PLAUSIBLE_SRC: ${PLAUSIBLE_SRC:-https://plausible.io/js/script.js}
+    volumes:
+      - explorer-data:/data
+    restart: unless-stopped
+
+volumes:
+  explorer-data:

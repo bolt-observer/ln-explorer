@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bolt.observer — Lightning Network explorer</title>
+    <meta
+      name="description"
+      content="Public Lightning Network explorer: live gossip graph, node and channel pages, search, and network stats."
+    />
+    <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/style.css" />
+    <!--PLAUSIBLE-->
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/">
+        <img src="/logo.svg" alt="" width="36" height="36" />
+        <span>bolt<span class="dot">.</span>observer</span>
+      </a>
+      <nav>
+        <a href="/" data-nav="graph">Graph</a>
+        <a href="/nodes" data-nav="nodes">Nodes</a>
+        <a href="/stats" data-nav="stats">Stats</a>
+      </nav>
+      <form id="search-form" role="search">
+        <input
+          id="search-input"
+          type="search"
+          name="q"
+          placeholder="Alias, pubkey, or channel"
+          autocomplete="off"
+          aria-label="Search the Lightning Network"
+        />
+      </form>
+    </header>
+    <div id="sync-banner" class="sync-banner" hidden></div>
+    <main id="app"></main>
+    <footer>
+      <span>Public Lightning gossip · no accounts</span>
+      <span id="footer-meta"></span>
+    </footer>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
