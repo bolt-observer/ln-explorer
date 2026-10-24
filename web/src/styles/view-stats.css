@@ -1,6 +1,6 @@
 /* stats view */
 .st-sheet .sheet-h { padding-top: 10px; }
-.st-sheet .seg[hidden] { display: none; }
+.st-sheet .seg.is-off { visibility: hidden; }
 .st-body { padding: 4px 24px 8px; }
 
 /* ---------- chart + KPI column ---------- */

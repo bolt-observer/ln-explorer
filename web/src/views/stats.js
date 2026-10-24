@@ -351,7 +351,15 @@ export async function mount(ctx) {
   const chartHost = $(".st-chart");
   const legendHost = $(".st-legend");
   const capSeg = sheet.actions.querySelector('[data-seg="cap"]');
-  capSeg.hidden = state.metric !== "capacity";
+  // Keep the currency toggle's box in the layout for every metric so the header
+  // controls never shift; it is only invisible and inert when not on Capacity.
+  const syncCapSeg = () => {
+    const off = state.metric !== "capacity";
+    capSeg.classList.toggle("is-off", off);
+    capSeg.inert = off;
+    capSeg.setAttribute("aria-hidden", String(off));
+  };
+  syncCapSeg();
 
   const soft = (promise) => promise.catch((error) => (isAbort(error) ? Promise.reject(error) : null));
   const statsP = api("/api/stats", { signal });
@@ -527,7 +535,7 @@ export async function mount(ctx) {
     if (state[k] === v) return;
     state[k] = v;
     button.parentElement.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b === button)));
-    capSeg.hidden = state.metric !== "capacity";
+    syncCapSeg();
     const query = new URLSearchParams(location.search);
     query.set(k, v);
     setQuery(query);
