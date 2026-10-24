@@ -8,6 +8,7 @@ and keeps serving the previous snapshot if a refresh fails.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import threading
 import time
@@ -15,7 +16,7 @@ import time
 from explorer.config import Settings
 from explorer.rgs import parse_scid
 from explorer.sources import Mempool, SourceError, fetch_lnd, fetch_rgs, load_graph_file
-from explorer.store import Store
+from explorer.store import CLOSE_MAX_LOOKUPS, Store
 
 logger = logging.getLogger(__name__)
 
@@ -532,6 +533,66 @@ def enrich_channel(store: Store, mempool: Mempool, scid: int) -> dict | None:
     return payload
 
 
+def _closure_date(value) -> str | None:
+    """mempool reports an ISO string (older versions a unix timestamp)."""
+    if isinstance(value, str) and "T" in value:
+        return value
+    stamp = _number(value)
+    if not stamp:
+        return None
+    return datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
+
+
+def _closure_fields(payload) -> dict:
+    """Fields mempool's GET /v1/lightning/channels/<id> carries for a close."""
+    if not isinstance(payload, dict):
+        return {}
+    reason = payload.get("closing_reason")
+    status = payload.get("status")
+    return {
+        "closing_reason": int(reason) if isinstance(reason, (int, float)) else None,
+        "closing_date": _closure_date(payload.get("closing_date")),
+        "closing_txid": str(payload.get("closing_transaction_id") or "") or None,
+        "mempool_status": int(status) if isinstance(status, (int, float)) else None,
+    }
+
+
+def resolve_closures(store: Store, mempool: Mempool, budget: int) -> int:
+    """Look up unresolved channel closes at mempool.space.
+
+    A row is resolved once mempool names a closing reason. Unresolved rows
+    retry at most once per 12h and at most 6 times in total; a 404 marks the
+    lookup given up. HTTP 429 stops the batch. mempool's Lightning indexer
+    stopped around 2026-08-30, so later closes usually stay unknown.
+    """
+    if budget <= 0 or not mempool.enabled:
+        return 0
+    resolved = 0
+    for row in store.closure_candidates(budget):
+        scid = row["scid"]
+        try:
+            payload = mempool.channel(scid)
+        except SourceError as exc:
+            if exc.status == 429:
+                logger.warning("Mempool rate limited during close lookups; stopping batch")
+                return resolved
+            if exc.status == 404:
+                store.update_closure(scid, {"lookups": CLOSE_MAX_LOOKUPS, "last_lookup": time.time()})
+                continue
+            store.update_closure(
+                scid, {"lookups": row["lookups"] + 1, "last_lookup": time.time()}
+            )
+            continue
+        fields = _closure_fields(payload)
+        attempt = {"lookups": row["lookups"] + 1, "last_lookup": time.time(), **fields}
+        store.update_closure(scid, attempt)
+        if fields.get("closing_reason") is not None:
+            resolved += 1
+    return resolved
+
+
 def refresh_once(store: Store, settings: Settings) -> None:
     """Download a snapshot, recompute metrics, and enrich a batch of nodes."""
     mempool = Mempool(settings.mempool_api, min_interval=1.0 / max(settings.enrich_rps, 0.1))
@@ -572,6 +633,12 @@ def refresh_once(store: Store, settings: Settings) -> None:
         except Exception:
             logger.exception("Bulk alias fetch failed")
         try:
+            resolved = resolve_closures(store, mempool, settings.close_lookups_per_refresh)
+            if resolved:
+                logger.info("Resolved %s channel closures from mempool", resolved)
+        except Exception:
+            logger.exception("Closure lookups failed")
+        try:
             fill_capacities(store, mempool, settings.capacity_pages_per_refresh)
         except Exception:
             logger.exception("Capacity fill failed")
@@ -589,6 +656,13 @@ def refresh_once(store: Store, settings: Settings) -> None:
         store.recompute_metrics(samples=settings.metrics_samples)
     except Exception:
         logger.exception("Metric computation failed")
+
+    try:
+        stored_ranks = store.record_rank_history(settings.rank_history_top)
+        if stored_ranks:
+            logger.info("Stored %s rank history rows for today", stored_ranks)
+    except Exception:
+        logger.exception("Rank history write failed")
 
     logger.info(
         "Refresh names %.1f%% of nodes, channel capacity coverage %.2f%%",

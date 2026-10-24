@@ -19,7 +19,15 @@ logger = logging.getLogger(__name__)
 
 PUBKEY_RE = re.compile(r"^[0-9a-fA-F]{66}$")
 DOMAIN_RE = re.compile(r"^[a-z0-9.-]+$")
-PAGE_ROUTES = {"", "nodes", "stats", "search", "node", "channel"}
+PAGE_ROUTES = {"", "nodes", "stats", "search", "node", "channel", "rankings"}
+
+
+def _bounded_int(name: str, default: int, lowest: int, highest: int) -> int:
+    try:
+        value = int(request.args.get(name, str(default)))
+    except ValueError:
+        value = default
+    return max(lowest, min(value, highest))
 
 
 def _page_args() -> tuple[int, int]:
@@ -150,6 +158,52 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
     def prices():
         return jsonify(store.price_payload())
 
+    @app.get("/api/events")
+    def events():
+        kind = (request.args.get("kind") or "").strip() or None
+        pubkey = (request.args.get("pubkey") or "").strip().lower() or None
+        if pubkey and not PUBKEY_RE.match(pubkey):
+            return jsonify({"error": "pubkey must be a node pubkey"}), 400
+        raw_scid = (request.args.get("scid") or "").strip()
+        scid = parse_scid(raw_scid) if raw_scid else None
+        if raw_scid and scid is None:
+            return jsonify({"error": "invalid channel id"}), 400
+        try:
+            before = int(request.args.get("before", "0"))
+        except ValueError:
+            before = 0
+        return jsonify(
+            {
+                "events": store.query_events(
+                    kind=kind,
+                    pubkey=pubkey,
+                    scid=scid,
+                    limit=_bounded_int("limit", 100, 1, 500),
+                    before=before or None,
+                )
+            }
+        )
+
+    @app.get("/api/flows")
+    def flows():
+        return jsonify(store.flows_payload(days=_bounded_int("days", 90, 1, 365)))
+
+    @app.get("/api/rankings")
+    def rankings():
+        metric = (request.args.get("metric") or "total_capacity").strip()
+        return jsonify(store.rankings_payload(metric, _bounded_int("limit", 100, 1, 500)))
+
+    @app.get("/api/rankings/movers")
+    def ranking_movers():
+        metric = (request.args.get("metric") or "total_capacity").strip()
+        return jsonify(
+            store.ranking_movers(
+                metric,
+                days=_bounded_int("days", 7, 1, 365),
+                limit=_bounded_int("limit", 20, 1, 100),
+            )
+        )
+
     @app.get("/api/graph")
     def graph():
         try:
@@ -225,6 +279,27 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
             return jsonify({"error": "node not found"}), 404
         page, page_size = _page_args()
         return jsonify(store.channels_for(pubkey, page, page_size))
+
+    @app.get("/api/nodes/<pubkey>/events")
+    def node_events(pubkey: str):
+        pubkey = pubkey.lower()
+        if not PUBKEY_RE.match(pubkey):
+            return jsonify({"error": "invalid pubkey"}), 400
+        # Events survive the node leaving the graph, so no 404 here.
+        return jsonify(
+            {
+                "events": store.query_events(
+                    pubkey=pubkey, limit=_bounded_int("limit", 100, 1, 500)
+                )
+            }
+        )
+
+    @app.get("/api/nodes/<pubkey>/ranks")
+    def node_ranks(pubkey: str):
+        pubkey = pubkey.lower()
+        if not PUBKEY_RE.match(pubkey):
+            return jsonify({"error": "invalid pubkey"}), 400
+        return jsonify(store.node_rank_history(pubkey, days=_bounded_int("days", 180, 1, 730)))
 
     @app.get("/api/channels/<channel_id>")
     def one_channel(channel_id: str):
