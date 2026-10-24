@@ -76,12 +76,13 @@ cd ~/explorer && git fetch origin && git checkout --detach origin/main && bash d
 
 `deploy/vm-deploy.sh` takes an online sqlite backup into `~/backups/explorer-<UTC time>.sqlite` first (newest 5 kept), refuses to start without the volume when backups exist (set `ALLOW_NEW_VOLUME=1` to override), then rebuilds in the background (`/tmp/build.log`).
 
-A volume only disappears with `docker compose down -v`, `docker volume rm`, or a new VM. Restore a backup with:
+A volume only disappears with `docker compose down -v`, `docker volume rm`, or a new VM. Restore a backup with (stop first; the restore drops stale WAL/SHM sidecars and keeps the app user as owner):
 
 ```bash
-docker compose stop explorer
-docker run --rm -v <project>_explorer-data:/data -v ~/backups:/b alpine sh -c "cp /b/explorer-YYYYMMDDTHHMMSSZ.sqlite /data/explorer.sqlite && chown 10001:10001 /data/explorer.sqlite"
-docker compose start explorer
+docker compose stop explorer 2>/dev/null || true
+docker run --rm -v <project>_explorer-data:/data -v ~/backups:/b alpine sh -c \
+  "rm -f /data/explorer.sqlite-wal /data/explorer.sqlite-shm && cp /b/explorer-YYYYMMDDTHHMMSSZ.sqlite /data/explorer.sqlite && chown -R 10001:10001 /data"
+docker compose up -d --build
 ```
 
 Copy `~/backups` off the VM before deleting or recreating it.
