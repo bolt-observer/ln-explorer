@@ -211,27 +211,29 @@ def validate_filter_tree(group, depth: int = 1) -> dict:
 
     Groups nest at most FILTER_MAX_DEPTH levels and hold at most
     FILTER_MAX_LEAVES conditions in total; leaves must name a whitelisted
-    field. Raises FilterError with a plain-language message otherwise.
+    field (leaves may sit at any group depth). Raises FilterError with a
+    plain-language message otherwise.
     """
-    if depth > FILTER_MAX_DEPTH:
-        raise FilterError(f"filter may nest at most {FILTER_MAX_DEPTH} levels")
     if not isinstance(group, dict):
         raise FilterError("filter must be an object with op and items")
-    if set(group) == {"op", "items"}:
-        op = group["op"]
-        if op not in FILTER_OPS:
-            raise FilterError(f'filter op must be one of {", ".join(sorted(FILTER_OPS))}')
-        items = group["items"]
-        if not isinstance(items, list) or not items:
-            raise FilterError('filter "items" must be a non-empty list')
-        normalized = {
-            "op": op,
-            "items": [validate_filter_tree(item, depth + 1) for item in items],
-        }
-        if _filter_leaf_count(normalized) > FILTER_MAX_LEAVES:
-            raise FilterError(f"filter may hold at most {FILTER_MAX_LEAVES} conditions")
-        return normalized
-    return _filter_leaf(group)
+    if set(group) != {"op", "items"}:
+        # A leaf at the top level or inside the deepest allowed group.
+        return _filter_leaf(group)
+    if depth > FILTER_MAX_DEPTH:
+        raise FilterError(f"filter may nest at most {FILTER_MAX_DEPTH} levels")
+    op = group["op"]
+    if op not in FILTER_OPS:
+        raise FilterError(f'filter op must be one of {", ".join(sorted(FILTER_OPS))}')
+    items = group["items"]
+    if not isinstance(items, list) or not items:
+        raise FilterError('filter "items" must be a non-empty list')
+    normalized = {
+        "op": op,
+        "items": [validate_filter_tree(item, depth + 1) for item in items],
+    }
+    if _filter_leaf_count(normalized) > FILTER_MAX_LEAVES:
+        raise FilterError(f"filter may hold at most {FILTER_MAX_LEAVES} conditions")
+    return normalized
 
 
 def _filter_leaf_count(group: dict) -> int:
