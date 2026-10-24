@@ -382,7 +382,7 @@ function wireRotation() {
       const camera = s.renderer.getCamera();
       // Supersede any running pan/zoom/rotate animation (sigma has no public
       // cancel) so it cannot keep writing its angle over the drag.
-      if (camera.isAnimated()) camera.animate(camera.getState(), { duration: 0 });
+      if (camera.isAnimated()) camera.animate(camera.getState(), { duration: 1 }); // 0 would divide by zero in sigma
       drag = { start: camera.getState().angle, from: pointerAngle(event), moved: false, button: event.button };
       el.classList.add("rotating");
       window.addEventListener("mousemove", onMove, true);
