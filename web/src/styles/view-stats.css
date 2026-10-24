@@ -34,6 +34,20 @@
 .st-key { display: inline-flex; align-items: center; gap: 6px; }
 .st-sw { display: inline-block; width: 16px; border-top: 2px solid var(--accent); }
 .st-sw.dash { border-top: 1.5px dashed var(--text-2); }
+.st-sw.fs-a { border-top-color: #8fb4ff; }
+.st-sw.fs-b { border-top-color: var(--warn); }
+.st-sw.band { border-top: 8px solid var(--fill-3); width: 12px; }
+.st-fline { fill: none; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.st-fline.fs-a { stroke: #8fb4ff; }
+.st-fline.fs-b { stroke: var(--warn); }
+.st-fline.fs-live { stroke: var(--accent); stroke-width: 2; }
+.st-fband { stroke: none; opacity: .14; }
+.st-fband.fs-a { fill: #8fb4ff; }
+.st-fband.fs-b { fill: var(--warn); }
+.st-fband.fs-live { fill: var(--accent); }
+.st-fdot.fs-a { fill: #8fb4ff; }
+.st-fdot.fs-b { fill: var(--warn); }
+.st-fdot.fs-live { fill: var(--accent); }
 .st-sq { display: inline-block; width: 8px; height: 8px; border-radius: 2px; background: var(--accent); }
 .st-sq.neg { background: var(--neg); }
 .st-legend-r { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; }

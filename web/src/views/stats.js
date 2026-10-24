@@ -9,6 +9,12 @@ import { openSheet } from "../ui/sheet.js";
 
 // mempool.space's backends have gaps of weeks; lines never bridge more than this.
 const HISTORY_GAP = 10 * 86400;
+// Fee history sources from /api/fees/history, oldest first; `cls` picks the stroke colour.
+const FEE_SOURCES = {
+  lnresearch: { cls: "fs-a", short: "lnresearch archive" },
+  "gossip-archive": { cls: "fs-b", short: "gossip archive" },
+  live: { cls: "fs-live", short: "this explorer" },
+};
 const DAY = 86400;
 const FLOW_DAYS = 90;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -115,7 +121,7 @@ function timeTicks(t0, t1, maxTicks) {
 
 /** History chart SVG plus the point list used for hover lookups. */
 function historyChart(points, { metric, cap, width, height }) {
-  const peakValue = Math.max(...points.map((p) => p.v));
+  const peakValue = Math.max(...points.map((p) => Math.max(p.v, p.hi ?? 0)));
   const step = niceStep((peakValue || 1) / 4);
   const yTop = Math.max(step, Math.ceil((peakValue * 1.04) / step) * step);
   const count = Math.round(yTop / step);
@@ -148,10 +154,33 @@ function historyChart(points, { metric, cap, width, height }) {
     .map((tick) => `<text class="st-ax" x="${f(X(tick.ts))}" y="${height - 6}" text-anchor="middle">${tick.label}</text>`)
     .join("");
 
-  const mempool = points.filter((p) => p.source !== "local");
-  const local = points.filter((p) => p.source === "local");
+  const fees = metric === "fees";
+  const mempool = fees ? [] : points.filter((p) => p.source !== "local");
+  const local = fees ? [] : points.filter((p) => p.source === "local");
   const path = (seg) => seg.map((p, i) => `${i ? "L" : "M"}${f(X(p.ts))},${f(Y(p.v))}`).join("");
   const series = [];
+  const feeGroups = [];
+  if (fees) {
+    // One colour per source; each gap-free run gets an interquartile band and a median line.
+    for (const source of Object.keys(FEE_SOURCES)) {
+      const own = points.filter((p) => p.source === source);
+      if (!own.length) continue;
+      feeGroups.push({ source, own });
+      const cls = FEE_SOURCES[source].cls;
+      for (const seg of splitGaps(own)) {
+        if (seg.length === 1) {
+          series.push(`<circle class="st-fdot ${cls}" cx="${f(X(seg[0].ts))}" cy="${f(Y(seg[0].v))}" r="2.5"/>`);
+          continue;
+        }
+        if (seg.every((p) => p.lo != null && p.hi != null)) {
+          const upper = seg.map((p, i) => `${i ? "L" : "M"}${f(X(p.ts))},${f(Y(p.hi))}`).join("");
+          const lower = seg.slice().reverse().map((p) => `L${f(X(p.ts))},${f(Y(p.lo))}`).join("");
+          series.push(`<path class="st-fband ${cls}" d="${upper}${lower}Z"/>`);
+        }
+        series.push(`<path class="st-fline ${cls}" d="${path(seg)}"/>`);
+      }
+    }
+  }
   for (const seg of splitGaps(mempool)) {
     if (seg.length === 1) {
       series.push(`<circle class="st-dot" cx="${f(X(seg[0].ts))}" cy="${f(Y(seg[0].v))}" r="2.5"/>`);
@@ -178,6 +207,10 @@ function historyChart(points, { metric, cap, width, height }) {
     summary.push(
       `mempool.space: ${fmt(mempool[0].v)} on ${date(mempool[0].ts)}, ${fmt(last.v)} on ${date(last.ts)}, peak ${fmt(peak.v)} on ${date(peak.ts)}.`
     );
+  }
+  for (const { source, own } of feeGroups) {
+    const last = own[own.length - 1];
+    summary.push(`${FEE_SOURCES[source].short}: ${date(own[0].ts)} to ${date(last.ts)}, latest median ${fmt(last.v)}.`);
   }
   if (local.length) {
     const last = local[local.length - 1];
@@ -364,11 +397,13 @@ export async function mount(ctx) {
   const soft = (promise) => promise.catch((error) => (isAbort(error) ? Promise.reject(error) : null));
   const statsP = api("/api/stats", { signal });
   const historyP = api(`/api/history?range=${state.range}`, { signal });
+  const feeHistoryP = soft(api(`/api/fees/history?range=${state.range}`, { signal }));
   const flowsP = soft(api(`/api/flows?days=${FLOW_DAYS}`, { signal }));
   const eventsP = soft(api("/api/events?limit=60", { signal }));
 
   let stats;
   let history = null;
+  let feeHistory = null;
   let historyError = null;
   let flows = null;
   let events = null;
@@ -403,7 +438,10 @@ export async function mount(ctx) {
     dot.setAttribute("cy", p.y.toFixed(1));
     dot.classList.toggle("local", p.source === "local");
     const t = tip();
-    t.innerHTML = `<div class="lbl">${esc(date(p.ts))} · ${p.source === "local" ? "this explorer" : "mempool.space"}</div><div class="v mono">${esc(formatValue(state.metric, state.cap, p.v))}</div>`;
+    const fee = FEE_SOURCES[p.source];
+    const where = fee ? fee.short : p.source === "local" ? "this explorer" : "mempool.space";
+    const band = fee && p.lo != null ? `<div class="lbl">p25–p75 ${esc(num(p.lo, 0))}–${esc(num(p.hi, 0))} ppm · base ${esc(num(p.base ?? 0, 0))} msat</div>` : "";
+    t.innerHTML = `<div class="lbl">${esc(date(p.ts))} · ${esc(where)}</div><div class="v mono">${esc(formatValue(state.metric, state.cap, p.v))}</div>${band}`;
     t.hidden = false;
     const x = mx ?? p.x;
     const y = my ?? p.y;
@@ -431,6 +469,20 @@ export async function mount(ctx) {
   function renderLegend() {
     if (!history) {
       legendHost.innerHTML = "";
+      return;
+    }
+    if (state.metric === "fees") {
+      const list = feeHistory?.series || [];
+      legendHost.innerHTML = `
+        ${list.map((s) => `<span class="st-key"><i class="st-sw ${FEE_SOURCES[s.source]?.cls || ""}"></i>${esc(s.label)}</span>`).join("")}
+        <span class="st-key"><i class="st-sw band"></i>p25–p75</span>
+        <span class="st-legend-r">Median fee rate
+          <details class="info right"><summary aria-label="About the fee data">${icon("info")}</summary><div>
+            ${feeHistory?.definitions ? `<p>${esc(feeHistory.definitions)}</p>` : ""}
+            ${list.map((s) => `<p><b>${esc(s.label)}</b> (${esc(isoDay(s.first))} to ${esc(isoDay(s.last))}): ${esc(s.note)}</p>`).join("")}
+            <p>Breaks in a line are days without data.</p>
+          </div></details>
+        </span>`;
       return;
     }
     const until = history.external_until;
@@ -466,8 +518,8 @@ export async function mount(ctx) {
     if (!history || !chartWidth) return;
     const height = chartHeight(chartWidth);
     chartH = height;
-    const points = history.points
-      .map((p) => ({ ts: p.ts, source: p.source === "local" ? "local" : "mempool", v: Number(metricValue(state.metric, state.cap, p)) }))
+    const points = (state.metric === "fees" ? feePoints() : history.points
+      .map((p) => ({ ts: p.ts, source: p.source === "local" ? "local" : "mempool", v: Number(metricValue(state.metric, state.cap, p)) })))
       .filter((p) => p.v != null && Number.isFinite(p.v) && p.v > 0)
       .sort((a, b) => a.ts - b.ts);
     if (!points.length) {
@@ -510,13 +562,29 @@ export async function mount(ctx) {
     showHover(Math.max(0, Math.min(last, hover.index < 0 && event.key.startsWith("Arrow") ? last : next)));
   });
 
+  /** Daily fee rows as chart points: median line, p25–p75 band. */
+  function feePoints() {
+    const out = [];
+    for (const s of feeHistory?.series || []) {
+      const col = Object.fromEntries((feeHistory.columns || []).map((name, i) => [name, i]));
+      for (const row of s.points) {
+        out.push({ ts: row[col.ts], source: s.source, v: Number(row[col.p50]), lo: row[col.p25], hi: row[col.p75], base: row[col.med_base_msat] });
+      }
+    }
+    return out;
+  }
+
   async function loadHistory() {
     const seq = ++historySeq;
     chartHost.classList.add("st-busy");
     try {
-      const payload = await api(`/api/history?range=${state.range}`, { signal });
+      const [payload, fees] = await Promise.all([
+        api(`/api/history?range=${state.range}`, { signal }),
+        api(`/api/fees/history?range=${state.range}`, { signal }).catch((error) => (isAbort(error) ? Promise.reject(error) : null)),
+      ]);
       if (seq !== historySeq || !ctx.alive()) return;
       history = payload;
+      feeHistory = fees;
       historyError = null;
     } catch (error) {
       if (isAbort(error) || seq !== historySeq) return;
@@ -706,7 +774,7 @@ export async function mount(ctx) {
 
   // ----- load -----
   const seq = ++historySeq;
-  const [statsResult, historyResult] = await Promise.allSettled([statsP, historyP]);
+  const [statsResult, historyResult, feeResult] = await Promise.allSettled([statsP, historyP, feeHistoryP]);
   if (!ctx.alive()) return cleanup;
   if (statsResult.status === "rejected") {
     if (isAbort(statsResult.reason)) return cleanup;
@@ -716,6 +784,7 @@ export async function mount(ctx) {
   stats = statsResult.value;
   if (seq === historySeq) {
     if (historyResult.status === "fulfilled") history = historyResult.value;
+    if (feeResult.status === "fulfilled") feeHistory = feeResult.value;
     else if (!isAbort(historyResult.reason)) historyError = historyResult.reason;
     renderLegend();
   }
