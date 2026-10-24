@@ -1,0 +1,63 @@
+/* rankings view */
+.rk-sub { margin-right: 4px; }
+.sheet-sub:has(.rk-sub) { display: inline-flex; align-items: center; gap: 4px; }
+
+.rk-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 0 24px 14px; }
+.rk-bar .chip[disabled] { opacity: 0.4; cursor: default; }
+
+.rk-content { padding: 0 12px 16px; }
+.rk-note { padding: 4px 12px 14px; }
+.rk-error { margin: 4px 12px 16px; }
+
+/* movers: two hairline-separated columns above the table */
+.rk-movers { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; padding: 4px 12px 18px; }
+.rk-mov .empty-line { padding: 4px 0; font-size: 12.5px; }
+.rk-mlist { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.rk-mrow {
+  display: grid; grid-template-columns: minmax(0, 1fr) 56px 56px; gap: 12px; align-items: center;
+  height: 28px; padding: 0 6px; margin: 0 -6px; border-radius: 6px; font-size: 12.5px; color: var(--text-2);
+}
+.rk-mrow:hover { background: var(--fill); color: var(--text); }
+.rk-mrow > .up, .rk-mrow > .down { font: 12px var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
+.rk-mrank { font-size: 12px; color: var(--muted); text-align: right; }
+
+/* table */
+.rk-table { table-layout: auto; }
+.rk-table th { background: linear-gradient(var(--glass-strong), var(--glass-strong)), var(--bg); }
+.rk-table .rk-short { display: none; }
+.rk-table .rk-val { width: 40%; }
+.rk-table .rk-val .capcell { min-width: 120px; }
+.rk-table th.rk-rank, .rk-table td.rk-rank { width: 36px; color: var(--muted); }
+.rk-table .name { color: var(--text); }
+.rk-table a.name:hover b { color: var(--accent); }
+.rk-table td.rk-chg { width: 52px; }
+.rk-table .rk-new { color: var(--muted); font-family: var(--sans); font-size: 11.5px; }
+.rk-table .rk-same { color: var(--faint); }
+.rk-table td.rk-spark { width: 96px; padding-right: 12px; }
+.rk-table td.rk-spark .spark { display: block; }
+.rk-table tbody tr:focus-visible { outline-offset: -2px; }
+
+/* skeleton */
+.rk-sk-note { width: 320px; max-width: 70%; }
+.rk-sk-rank { width: 18px; margin-left: auto; }
+.rk-sk-name { width: 140px; }
+.rk-sk-key { width: 90px; height: 8px; opacity: 0.6; }
+.rk-sk-val { width: 72px; margin-left: auto; }
+
+@media (max-width: 720px) {
+  .rk-bar { padding: 0 16px 12px; }
+  .rk-bar .seg { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; scrollbar-width: none; }
+  .rk-content { padding: 0 4px 16px; }
+  .rk-movers { grid-template-columns: 1fr; gap: 16px; }
+  .rk-table th, .rk-table td { padding: 0 8px; }
+  .rk-table .name { max-width: 130px; }
+  .rk-table th.rk-rank, .rk-table td.rk-rank { width: 24px; }
+  .rk-table td.rk-chg { width: 40px; }
+  .rk-table .rk-long { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .rk-table .rk-short { display: inline; }
+  .rk-table .rk-d1, .rk-table .rk-d30 { display: none; }
+  .rk-table td.rk-spark .spark { width: 56px; }
+  .rk-table .rk-val { width: auto; }
+  .rk-table .rk-val .capcell { min-width: 0; display: block; text-align: right; }
+  .rk-table .rk-val .bar { display: none; }
+}

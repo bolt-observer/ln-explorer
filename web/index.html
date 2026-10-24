@@ -2,55 +2,28 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>bolt.observer — Lightning Network explorer</title>
     <meta
       name="description"
       content="Public Lightning Network explorer: live gossip graph, node and channel pages, search, and network stats."
     />
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
-    <meta name="theme-color" content="#121212" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#070908" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="stylesheet" href="/style.css" />
+    <link rel="preload" href="/fonts/ibm-plex-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/ibm-plex-sans-latin-500-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/static/app.css" />
     <!--PLAUSIBLE-->
   </head>
-  <body>
-    <header class="topbar">
-      <a class="brand" href="/">
-        <img src="/logo.svg" alt="" width="36" height="36" />
-        <span class="brand-text">
-          <span>bolt<span class="dot">.</span>observer</span>
-          <span class="brand-sub">Lightning explorer</span>
-        </span>
-      </a>
-      <nav>
-        <a href="/" data-nav="graph">Graph</a>
-        <a href="/nodes" data-nav="nodes">Nodes</a>
-        <a href="/rankings" data-nav="rankings">Rankings</a>
-        <a href="/stats" data-nav="stats">Stats</a>
-      </nav>
-      <form id="search-form" role="search">
-        <input
-          id="search-input"
-          type="search"
-          name="q"
-          placeholder="Alias, pubkey, or channel"
-          autocomplete="off"
-          aria-label="Search the Lightning Network"
-        />
-      </form>
-    </header>
-    <div id="sync-banner" class="sync-banner" hidden></div>
-    <main id="app"></main>
-    <footer>
-      <span>
-        © bolt.observer <span id="footer-year"></span> · data: LDK rapid gossip sync · mempool.space ·
-        <a href="https://github.com/bolt-observer/ln-explorer">source on GitHub</a> · no cookies, no tracking
-      </span>
-      <span id="footer-meta"></span>
-    </footer>
+  <body data-mode="map">
+    <div id="map-layer" class="map-layer" role="region" aria-label="Lightning Network map. Use search to reach any node or channel by keyboard."><div id="map" class="map"></div></div>
+    <header id="topbar" class="topbar"><a class="brand" href="/">bolt.observer</a></header>
+    <div id="banner" class="banner" role="status" hidden></div>
+    <main id="view"></main>
+    <noscript><p style="padding:96px 24px;text-align:center">bolt.observer needs JavaScript to draw the Lightning Network map.</p></noscript>
     <script src="/static/app.js"></script>
   </body>
 </html>
