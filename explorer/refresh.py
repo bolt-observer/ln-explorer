@@ -53,33 +53,133 @@ def _apply_ranking_row(store: Store, row: dict) -> None:
     )
 
 
-def _history_from_mempool(payload) -> list[dict]:
-    rows = []
+def _number(value) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _history_all_rows(payload) -> list[dict]:
+    """Rows from /v1/lightning/statistics/all (newest first), oldest first out.
+
+    That response has no node_count; the announced node classes sum to it:
+    tor + clearnet + clearnet_tor + unannounced. It reaches back to March 2018.
+    """
     if isinstance(payload, dict):
-        payload = payload.get("latest") or payload.get("values") or []
-        if isinstance(payload, dict):
-            payload = [payload]
+        payload = payload.get("statistics") or payload.get("values") or []
+    rows: list[dict] = []
     if not isinstance(payload, list):
         return rows
     for item in payload:
         if not isinstance(item, dict):
             continue
-        added = item.get("added")
-        if isinstance(added, str):
+        ts = _number(item.get("added"))
+        if not ts:
+            continue
+        tor = _number(item.get("tor_nodes"))
+        clearnet = _number(item.get("clearnet_nodes"))
+        both = _number(item.get("clearnet_tor_nodes"))
+        unannounced = _number(item.get("unannounced_nodes"))
+        parts = [value for value in (tor, clearnet, both, unannounced) if value is not None]
+        node_count = sum(parts) if parts else None
+        if _number(item.get("channel_count")) is None and _number(item.get("total_capacity")) is None:
             continue
         rows.append(
             {
-                "ts": int(added or 0),
-                "node_count": item.get("node_count"),
-                "channel_count": item.get("channel_count"),
-                "total_capacity": item.get("total_capacity"),
-                "med_base_fee": item.get("med_base_fee_mtokens"),
-                "med_fee_rate": item.get("med_fee_rate"),
-                "source": "mempool",
+                "ts": ts,
+                "node_count": node_count,
+                "channel_count": _number(item.get("channel_count")),
+                "total_capacity": _number(item.get("total_capacity")),
+                "tor_nodes": tor,
+                "clearnet_nodes": clearnet,
+                "clearnet_tor_nodes": both,
+                "unannounced_nodes": unannounced,
             }
         )
     rows.sort(key=lambda row: row["ts"])
     return rows
+
+
+def daily_prices(payload) -> dict[int, tuple[float | None, float | None]]:
+    """Downsample mempool's historical-price rows to one value per UTC day.
+
+    Rows run roughly hourly (daily for older dates), so the last valid value
+    of each day wins. Mempool reports -1 for unknown rates; those are skipped.
+    """
+    rows = []
+    if isinstance(payload, dict):
+        rows = payload.get("prices") or []
+    elif isinstance(payload, list):
+        rows = payload
+    daily: dict[int, list] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        stamp = _number(row.get("time"))
+        if not stamp:
+            continue
+        slot = daily.setdefault(stamp - stamp % 86400, [None, None])
+        usd = row.get("USD")
+        eur = row.get("EUR")
+        if isinstance(usd, (int, float)) and not isinstance(usd, bool) and usd > 0:
+            slot[0] = float(usd)
+        if isinstance(eur, (int, float)) and not isinstance(eur, bool) and eur > 0:
+            slot[1] = float(eur)
+    return {
+        day: (usd, eur)
+        for day, (usd, eur) in daily.items()
+        if usd is not None or eur is not None
+    }
+
+
+# statistics/all is a large response and changes once a day at most.
+EXTERNAL_FETCH_INTERVAL = 86400.0
+HISTORY_SAMPLES = 3
+
+
+def refresh_history(store: Store, mempool: Mempool) -> None:
+    """Pull the multi-year series from mempool at most once per 24h."""
+    if not mempool.enabled:
+        return
+    if time.time() - store.last_history_fetch < EXTERNAL_FETCH_INTERVAL:
+        return
+    try:
+        # mempool.space answers from several backends whose Lightning
+        # statistics have different gaps (one stopped on 2026-08-30, another
+        # is current). Union a few responses; rows merge by timestamp.
+        rows: list[dict] = []
+        for _attempt in range(HISTORY_SAMPLES):
+            rows.extend(_history_all_rows(mempool.statistics_all()))
+        rows.extend(_history_all_rows(mempool.statistics("1y")))
+        stored = store.record_external_history(rows)
+        store.mark_history_fetched()
+        logger.info("Recorded %s external history rows from mempool", stored)
+    except Exception as exc:
+        logger.warning("Mempool history refresh failed, keeping cache: %s", exc)
+
+
+def refresh_prices(store: Store, mempool: Mempool) -> None:
+    """Current BTC price every refresh, the daily series once per 24h."""
+    if not mempool.enabled:
+        return
+    try:
+        payload = mempool.prices()
+        if isinstance(payload, dict) and payload.get("USD"):
+            store.set_current_prices(payload)
+    except Exception as exc:
+        logger.warning("Mempool price fetch failed, keeping cache: %s", exc)
+    if time.time() - store.last_price_fetch < EXTERNAL_FETCH_INTERVAL:
+        return
+    try:
+        daily = daily_prices(mempool.historical_prices())
+        stored = store.record_prices(daily)
+        store.mark_prices_fetched()
+        logger.info("Recorded %s daily BTC prices from mempool", stored)
+    except Exception as exc:
+        logger.warning("Mempool historical price refresh failed, keeping cache: %s", exc)
 
 
 def _stats_from_mempool(payload) -> dict:
@@ -447,10 +547,7 @@ def refresh_once(store: Store, settings: Settings) -> None:
 
     if mempool.enabled:
         try:
-            store.remember_network_stats(
-                _stats_from_mempool(mempool.statistics("latest")),
-                _history_from_mempool(mempool.statistics("1y")),
-            )
+            store.remember_network_stats(_stats_from_mempool(mempool.statistics("latest")))
             for kind in ("liquidity", "connectivity", "age"):
                 rows = mempool.rankings(kind)
                 if isinstance(rows, list):
@@ -459,6 +556,13 @@ def refresh_once(store: Store, settings: Settings) -> None:
                             _apply_ranking_row(store, row)
         except Exception as exc:
             logger.warning("Mempool statistics/rankings failed: %s", exc)
+
+    if mempool.enabled:
+        try:
+            refresh_history(store, mempool)
+            refresh_prices(store, mempool)
+        except Exception as exc:
+            logger.warning("Mempool history and prices failed: %s", exc)
 
     if mempool.enabled:
         try:
@@ -475,6 +579,11 @@ def refresh_once(store: Store, settings: Settings) -> None:
             targets = store.nodes_to_enrich(settings.enrich_per_refresh)
             logger.info("Enriching %s node profiles from mempool", len(targets))
             enrich_profiles(store, mempool, targets)
+
+    try:
+        store.record_local_snapshot()
+    except Exception:
+        logger.exception("Recording the local snapshot failed")
 
     try:
         store.recompute_metrics(samples=settings.metrics_samples)

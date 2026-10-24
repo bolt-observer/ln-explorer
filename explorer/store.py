@@ -16,10 +16,58 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from explorer import fees
 from explorer.metrics import compute_metrics
 from explorer.rgs import ParsedGraph, Policy, format_scid
 
 logger = logging.getLogger(__name__)
+
+# Snapshot aggregate columns added on top of the original seven. Old rows keep
+# their values; the new columns are NULL until the next refresh fills them.
+SNAPSHOT_AGGREGATE_COLUMNS: dict[str, str] = {
+    "enabled_channels": "INTEGER",
+    "disabled_channels": "INTEGER",
+    "capacity_known_channels": "INTEGER",
+    "gossip_capacity": "INTEGER",
+    "avg_channel_capacity": "REAL",
+    "med_channel_capacity": "REAL",
+    "fee_rate_count": "INTEGER",
+    "fee_rate_min": "REAL",
+    "fee_rate_max": "REAL",
+    "fee_rate_mean": "REAL",
+    "fee_rate_median": "REAL",
+    "fee_rate_std": "REAL",
+    "fee_rate_p90": "REAL",
+    "fee_rate_mean_filtered": "REAL",
+    "fee_rate_mean_capweighted": "REAL",
+    "base_fee_count": "INTEGER",
+    "base_fee_min": "REAL",
+    "base_fee_max": "REAL",
+    "base_fee_mean": "REAL",
+    "base_fee_median": "REAL",
+    "base_fee_std": "REAL",
+    "base_fee_p90": "REAL",
+    "base_fee_mean_filtered": "REAL",
+    "base_fee_mean_capweighted": "REAL",
+}
+
+# One row per refresh (~8/day); anything older than three years is dropped.
+SNAPSHOT_RETENTION_SECONDS = int(3 * 365.25 * 86400)
+HISTORY_RANGES = {"1y": 365 * 86400, "3y": int(3 * 365.25 * 86400)}
+STALE_AFTER_SECONDS = 3 * 86400
+HISTORY_MAX_POINTS = 1000
+EXTERNAL_HISTORY_COLUMNS = (
+    "node_count",
+    "channel_count",
+    "total_capacity",
+    "tor_nodes",
+    "clearnet_nodes",
+    "clearnet_tor_nodes",
+    "unannounced_nodes",
+    "med_fee_rate",
+    "med_base_fee",
+    "avg_fee_rate",
+)
 
 SORT_FIELDS = {
     "alias",
@@ -81,6 +129,78 @@ def _mean(values: list[float]) -> float:
     if not values:
         return 0.0
     return float(statistics.fmean(values))
+
+
+def _downsample(points: list[dict], max_points: int) -> list[dict]:
+    """Keep the last point of each of at most ``max_points`` time buckets.
+
+    The first local point is never dropped: it anchors the dashed
+    continuation of the series after mempool's statistics stop.
+    """
+    if len(points) <= max_points:
+        return points
+    first_ts = points[0]["ts"]
+    # span / (max_points - 1) keeps the bucket count at or below the cap even
+    # when the span divides exactly; the re-insert below trades, never adds.
+    width = max(1.0, (points[-1]["ts"] - first_ts) / max(1, max_points - 1))
+    kept: list[dict] = []
+    previous_bucket = None
+    for point in points:
+        bucket = int((point["ts"] - first_ts) // width)
+        if kept and bucket == previous_bucket:
+            kept[-1] = point
+        else:
+            kept.append(point)
+            previous_bucket = bucket
+    first_local = next(
+        (point for point in points if point.get("source") == "local"), None
+    )
+    if first_local is not None and not any(
+        point["ts"] == first_local["ts"] and point.get("source") == "local"
+        for point in kept
+    ):
+        index = next(
+            (i for i, point in enumerate(kept) if point["ts"] > first_local["ts"]),
+            len(kept),
+        )
+        kept.insert(index, first_local)
+        # Hold the cap by dropping the kept point closest in time to the one
+        # just re-inserted (never the first local point itself).
+        if len(kept) > max_points:
+            neighbours = []
+            if index > 0:
+                neighbours.append(kept[index - 1])
+            if index + 1 < len(kept):
+                neighbours.append(kept[index + 1])
+            if neighbours:
+                kept.remove(
+                    min(neighbours, key=lambda point: abs(point["ts"] - first_local["ts"]))
+                )
+    return kept
+
+
+def _history_note(until: int | None, stale: bool) -> str:
+    ours = (
+        "The dashed line is this explorer's own gossip snapshot, taken every refresh. "
+        "It counts only nodes and channels in the public rapid gossip sync snapshot "
+        "(capacity only where known), so its lower level is a methodology difference, "
+        "not a network event."
+    )
+    if until is None:
+        return "No mempool.space history is available yet. " + ours
+    date = time.strftime("%Y-%m-%d", time.gmtime(until))
+    gaps = (
+        "mempool.space serves its Lightning statistics from several backends with "
+        "different gaps (some stopped updating on 2026-08-30); every response we see "
+        "is merged, and lines break across gaps longer than 10 days. "
+    )
+    if stale:
+        return (
+            f"mempool.space network statistics stop on {date}. " + gaps
+            + "Points after that come only from our own snapshots. " + ours
+        )
+    return f"Solid lines: mempool.space network statistics, latest {date}. " + gaps + ours
+
 
 
 def _protocols(addresses: list[str]) -> tuple[bool, bool, bool]:
@@ -181,7 +301,14 @@ class Store:
         self.metrics: dict[str, dict] = {}
         self.metrics_meta = {"ready": False, "samples": 0, "capacity_weighted": False}
         self.network_stats: dict = {}
-        self.history: list[dict] = []
+        # Local aggregate rows (the ``snapshots`` table) and mempool's long
+        # series (``history_external``) are kept apart; /api/history merges them.
+        self.local_snapshots: list[dict] = []
+        self.external_history: list[dict] = []
+        self.current_prices: dict = {}
+        self.daily_prices: dict[int, tuple[float | None, float | None]] = {}
+        self.last_history_fetch = 0.0
+        self.last_price_fetch = 0.0
         self.updated_at = 0.0
         self.graph_timestamp = 0
         self.source = ""
@@ -247,8 +374,32 @@ class Store:
                 med_fee_rate INTEGER,
                 source TEXT
             );
+            CREATE TABLE IF NOT EXISTS history_external (
+                ts INTEGER PRIMARY KEY,
+                node_count INTEGER,
+                channel_count INTEGER,
+                total_capacity INTEGER,
+                tor_nodes INTEGER,
+                clearnet_nodes INTEGER,
+                clearnet_tor_nodes INTEGER,
+                unannounced_nodes INTEGER,
+                med_fee_rate REAL,
+                med_base_fee REAL,
+                avg_fee_rate REAL
+            );
+            CREATE TABLE IF NOT EXISTS prices (
+                day INTEGER PRIMARY KEY,
+                usd REAL,
+                eur REAL
+            );
             """
         )
+        snapshot_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(snapshots)")}
+        for column, declaration in SNAPSHOT_AGGREGATE_COLUMNS.items():
+            if column not in snapshot_columns:
+                self._conn.execute(
+                    f"ALTER TABLE snapshots ADD COLUMN {column} {declaration}"
+                )
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(nodes)")}
         if "capacity_page" not in columns:
             self._conn.execute(
@@ -262,7 +413,34 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE nodes ADD COLUMN capacity_scan INTEGER NOT NULL DEFAULT 0"
             )
+        self._import_legacy_history_blob()
+        # Rows written before the aggregate columns copied mempool's reported
+        # total into total_capacity; that is not our measurement.
+        self._conn.execute(
+            "UPDATE snapshots SET total_capacity = NULL"
+            " WHERE fee_rate_count IS NULL AND gossip_capacity IS NULL"
+        )
         self._conn.commit()
+
+    def _import_legacy_history_blob(self) -> None:
+        """Move meta.history_external (pre-table cache) into history_external."""
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT value FROM meta WHERE key = 'history_external'"
+        ).fetchone()
+        if not row:
+            return
+        rows: list[dict] = []
+        try:
+            legacy = json.loads(row[0] or "[]")
+            if isinstance(legacy, list):
+                rows = [self._external_row(item) for item in legacy if int(item.get("ts") or 0)]
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+            rows = []
+        if rows:
+            self._upsert_external_history(rows)
+            logger.info("Imported %s legacy external history rows from meta", len(rows))
+        self._conn.execute("DELETE FROM meta WHERE key = 'history_external'")
 
     def _load(self) -> None:
         assert self._conn is not None
@@ -307,10 +485,15 @@ class Store:
                     "eigenvector_rank": row["eigenvector_rank"],
                     "eigenvector_weighted_rank": row["eigenvector_weighted_rank"],
                 }
-            self.history = [
+            self.local_snapshots = [
                 dict(row)
                 for row in self._conn.execute("SELECT * FROM snapshots ORDER BY ts ASC")
             ]
+            self._load_external_history()
+            self.daily_prices = {
+                int(row["day"]): (row["usd"], row["eur"])
+                for row in self._conn.execute("SELECT day, usd, eur FROM prices")
+            }
             meta = {
                 row["key"]: row["value"]
                 for row in self._conn.execute("SELECT key, value FROM meta")
@@ -319,19 +502,118 @@ class Store:
             self.graph_timestamp = int(meta.get("graph_timestamp") or 0)
             self.source = meta.get("source") or ""
             self.source_detail = meta.get("source_detail") or ""
+            self.last_history_fetch = float(meta.get("last_mempool_history_fetch") or 0)
+            self.last_price_fetch = float(meta.get("last_mempool_price_fetch") or 0)
             if meta.get("network_stats"):
                 self.network_stats = json.loads(meta["network_stats"])
-            if meta.get("history_external"):
-                external = json.loads(meta["history_external"])
-                if external:
-                    self.history = external
+            if meta.get("current_prices"):
+                prices = json.loads(meta["current_prices"])
+                if isinstance(prices, dict):
+                    self.current_prices = prices
             self.metrics_meta["ready"] = bool(self.metrics)
             self._reindex()
             logger.info(
-                "Loaded cache: %s nodes, %s channels",
+                "Loaded cache: %s nodes, %s channels, %s local snapshots, %s history rows",
                 len(self.nodes),
                 len(self.channels),
+                len(self.local_snapshots),
+                len(self.external_history),
             )
+
+    def _load_external_history(self) -> None:
+        assert self._conn is not None
+        self.external_history = [
+            dict(row)
+            for row in self._conn.execute(
+                "SELECT * FROM history_external"
+                " WHERE channel_count IS NOT NULL OR total_capacity IS NOT NULL"
+                " ORDER BY ts ASC"
+            )
+        ]
+
+    @staticmethod
+    def _external_row(item: dict) -> dict:
+        def number(key: str):
+            value = item.get(key)
+            if value is None or value == "":
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        row = {"ts": int(item.get("ts") or 0)}
+        for column in EXTERNAL_HISTORY_COLUMNS:
+            row[column] = number(column)
+        return row
+
+    def _upsert_external_history(self, rows: list[dict]) -> None:
+        """Merge rows by ts. A None field keeps the value already stored."""
+        assert self._conn is not None
+        columns = ", ".join(EXTERNAL_HISTORY_COLUMNS)
+        placeholders = ", ".join(f":{column}" for column in EXTERNAL_HISTORY_COLUMNS)
+        updates = ", ".join(
+            f"{column} = COALESCE(excluded.{column}, history_external.{column})"
+            for column in EXTERNAL_HISTORY_COLUMNS
+        )
+        self._conn.executemany(
+            f"""INSERT INTO history_external (ts, {columns})
+                VALUES (:ts, {placeholders})
+                ON CONFLICT(ts) DO UPDATE SET {updates}""",
+            rows,
+        )
+
+    def record_external_history(self, rows: list[dict]) -> int:
+        """Store mempool's long-term network statistics (merged by timestamp)."""
+        with self._lock:
+            clean = [
+                self._external_row(row)
+                for row in rows
+                if isinstance(row, dict) and int(row.get("ts") or 0)
+            ]
+            if not clean:
+                return 0
+            self._upsert_external_history(clean)
+            self._conn.commit()
+            self._load_external_history()
+        return len(clean)
+
+    def record_prices(self, daily: dict[int, tuple[float | None, float | None]]) -> int:
+        """Store one BTC price per UTC day (day is the 00:00 UTC timestamp)."""
+        rows = [
+            (int(day), usd, eur)
+            for day, (usd, eur) in daily.items()
+            if usd is not None or eur is not None
+        ]
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO prices (day, usd, eur) VALUES (?, ?, ?)", rows
+            )
+            self._conn.commit()
+            for day, usd, eur in rows:
+                self.daily_prices[day] = (usd, eur)
+        return len(rows)
+
+    def set_current_prices(self, payload: dict) -> None:
+        with self._lock:
+            self.current_prices = dict(payload)
+            self.set_meta("current_prices", json.dumps(self.current_prices))
+
+    def set_meta(self, key: str, value: str) -> None:
+        assert self._conn is not None
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value)
+            )
+            self._conn.commit()
+
+    def mark_history_fetched(self) -> None:
+        self.last_history_fetch = time.time()
+        self.set_meta("last_mempool_history_fetch", str(self.last_history_fetch))
+
+    def mark_prices_fetched(self) -> None:
+        self.last_price_fetch = time.time()
+        self.set_meta("last_mempool_price_fetch", str(self.last_price_fetch))
 
     def _reindex(self) -> None:
         by_node: dict[str, list[int]] = defaultdict(list)
@@ -643,41 +925,206 @@ class Store:
             }
         logger.info("Metrics ready in %.1fs", time.time() - started)
 
-    def remember_network_stats(self, stats: dict, history: list[dict]) -> None:
+    def remember_network_stats(self, stats: dict) -> None:
+        """Keep the freshest 'latest' row. mempool's backends disagree on it."""
         with self._lock:
+            old = str(self.network_stats.get("added") or "")
+            new = str(stats.get("added") or "")
+            if not stats or (old and new and new < old):
+                return
             self.network_stats = stats
-            if history:
-                self.history = history
-            self._record_local_snapshot()
 
-    def _record_local_snapshot(self) -> None:
-        assert self._conn is not None
-        bases = []
-        rates = []
+    def _channel_aggregates(self) -> dict:
+        """Channel and directed-policy aggregates shared by snapshots and stats.
+
+        A channel counts as enabled unless both announced policies are
+        disabled (the same rule as adjacency()). Fee statistics cover every
+        non-disabled directed policy; each carries its channel capacity as a
+        weight so a capacity-weighted mean can drop far-out values first.
+        """
+        enabled = disabled = known = 0
+        capacities: list[float] = []
+        rates: list[float] = []
+        rate_weights: list[float] = []
+        bases: list[float] = []
+        base_weights: list[float] = []
+        gossip_capacity = 0
         for channel in self.channels.values():
-            for policy in (channel.policy1, channel.policy2):
-                if policy is not None and not policy.disabled:
-                    bases.append(policy.base_msat)
-                    rates.append(policy.ppm)
-        total = self.network_stats.get("total_capacity")
-        if not total:
-            total = sum(channel.capacity or 0 for channel in self.channels.values())
+            first, second = channel.policy1, channel.policy2
+            if (
+                first is not None
+                and second is not None
+                and first.disabled
+                and second.disabled
+            ):
+                disabled += 1
+            else:
+                enabled += 1
+            capacity = float(channel.capacity) if channel.capacity else 0.0
+            if capacity:
+                known += 1
+                capacities.append(capacity)
+                gossip_capacity += int(capacity)
+            for policy in (first, second):
+                if policy is None or policy.disabled:
+                    continue
+                rates.append(float(policy.ppm))
+                rate_weights.append(capacity)
+                bases.append(float(policy.base_msat))
+                base_weights.append(capacity)
+        return {
+            "enabled_channels": enabled,
+            "disabled_channels": disabled,
+            "capacity_known_channels": known,
+            "gossip_capacity": gossip_capacity,
+            "avg_channel_capacity": _mean(capacities) if capacities else None,
+            "med_channel_capacity": _median(capacities) if capacities else None,
+            "fee_rate": fees.summarize(rates, rate_weights),
+            "base_fee": fees.summarize(bases, base_weights),
+        }
+
+    def record_local_snapshot(self) -> dict:
+        """Persist one aggregate row for the current graph (once per refresh)."""
+        return self._record_local_snapshot()
+
+    def _record_local_snapshot(self) -> dict:
+        assert self._conn is not None
+        aggregates = self._channel_aggregates()
+        # Our own measurement only: mempool's reported total froze on 2026-08-30,
+        # so copying it would draw a flat line that is not ours.
+        total = aggregates["gossip_capacity"]
         row = {
             "ts": int(time.time()),
             "node_count": len(self.by_node),
             "channel_count": len(self.channels),
             "total_capacity": int(total or 0),
-            "med_base_fee": int(_median(bases)) if bases else 0,
-            "med_fee_rate": int(_median(rates)) if rates else 0,
+            "med_base_fee": int(aggregates["base_fee"]["median"] or 0),
+            "med_fee_rate": int(aggregates["fee_rate"]["median"] or 0),
             "source": self.source or "local",
+            "enabled_channels": aggregates["enabled_channels"],
+            "disabled_channels": aggregates["disabled_channels"],
+            "capacity_known_channels": aggregates["capacity_known_channels"],
+            "gossip_capacity": aggregates["gossip_capacity"],
+            "avg_channel_capacity": aggregates["avg_channel_capacity"],
+            "med_channel_capacity": aggregates["med_channel_capacity"],
         }
-        self._conn.execute(
-            """INSERT OR REPLACE INTO snapshots
-               (ts, node_count, channel_count, total_capacity, med_base_fee, med_fee_rate, source)
-               VALUES (:ts, :node_count, :channel_count, :total_capacity, :med_base_fee, :med_fee_rate, :source)""",
-            row,
+        for key, value in aggregates["fee_rate"].items():
+            row[f"fee_rate_{key}"] = value
+        for key, value in aggregates["base_fee"].items():
+            row[f"base_fee_{key}"] = value
+        with self._lock:
+            columns = ", ".join(row)
+            placeholders = ", ".join(f":{name}" for name in row)
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO snapshots ({columns}) VALUES ({placeholders})", row
+            )
+            self._conn.execute(
+                "DELETE FROM snapshots WHERE ts < ?",
+                (int(time.time() - SNAPSHOT_RETENTION_SECONDS),),
+            )
+            self._conn.commit()
+            self.local_snapshots = [
+                dict(snapshot)
+                for snapshot in self._conn.execute(
+                    "SELECT * FROM snapshots ORDER BY ts ASC"
+                )
+            ]
+        return row
+
+    def external_until(self) -> int | None:
+        """Newest timestamp in mempool's series, or None when there is none."""
+        if not self.external_history:
+            return None
+        return int(self.external_history[-1]["ts"])
+
+    def external_is_stale(self, now: float | None = None) -> bool:
+        """True when the external series stopped more than three days ago."""
+        until = self.external_until()
+        if until is None:
+            return False
+        return (now or time.time()) - until > STALE_AFTER_SECONDS
+
+    def local_since(self) -> int | None:
+        if not self.local_snapshots:
+            return None
+        return int(self.local_snapshots[0]["ts"])
+
+    def history_payload(self, range_name: str = "all", max_points: int = HISTORY_MAX_POINTS) -> dict:
+        """Merged, time-ordered history for /api/history.
+
+        Mempool rows cover everything up to external_until; local snapshot
+        rows continue the series strictly after it. Local counts come from the
+        rapid gossip sync snapshot and are not directly comparable with
+        mempool's totals, so the two series stay separate.
+        """
+        now = time.time()
+        window = HISTORY_RANGES.get(range_name)
+        cutoff = now - window if window else 0
+        until = self.external_until()
+        points = [
+            self._history_point(row, "mempool")
+            for row in self.external_history
+            if row["ts"] >= cutoff
+        ]
+        points.extend(
+            self._history_point(row, "local")
+            for row in self.local_snapshots
+            if row["ts"] >= cutoff
         )
-        self._conn.commit()
+        points.sort(key=lambda point: point["ts"])
+        points = _downsample(points, max_points)
+        stale = self.external_is_stale(now)
+        return {
+            "points": points,
+            "external_until": until,
+            "external_stale": stale,
+            "local_since": self.local_since(),
+            "currency_rates": dict(self.current_prices),
+            "notes": _history_note(until, stale),
+        }
+
+    def _history_point(self, row: dict, source: str) -> dict:
+        ts = int(row["ts"])
+        capacity = row.get("total_capacity")
+        usd = self._usd_for_day(ts)
+        capacity_usd = None
+        if usd is not None and capacity:
+            capacity_usd = capacity / 1e8 * usd
+        return {
+            "ts": ts,
+            "source": source,
+            "node_count": row.get("node_count"),
+            "channel_count": row.get("channel_count"),
+            "total_capacity": capacity,
+            "med_fee_rate": row.get("med_fee_rate"),
+            "med_base_fee": row.get("med_base_fee"),
+            "usd_price": usd,
+            "capacity_usd": capacity_usd,
+        }
+
+    def _usd_for_day(self, ts: int) -> float | None:
+        pair = self.daily_prices.get(ts - ts % 86400)
+        return pair[0] if pair else None
+
+    def raw_snapshots(self, limit: int = 200) -> list[dict]:
+        """Raw local aggregate rows, newest last."""
+        assert self._conn is not None
+        with self._lock:
+            rows = list(
+                self._conn.execute(
+                    "SELECT * FROM snapshots ORDER BY ts DESC LIMIT ?", (limit,)
+                )
+            )
+        rows.reverse()
+        return [dict(row) for row in rows]
+
+    def price_payload(self) -> dict:
+        latest = None
+        if self.daily_prices:
+            day = max(self.daily_prices)
+            usd, eur = self.daily_prices[day]
+            latest = {"day": day, "usd": usd, "eur": eur}
+        return {"current": dict(self.current_prices), "latest_daily": latest}
 
     def nodes_to_enrich(self, limit: int, max_age: float = 86400) -> list[str]:
         now = time.time()
@@ -784,7 +1231,6 @@ class Store:
                 "source": self.source,
                 "source_detail": self.source_detail,
                 "network_stats": json.dumps(self.network_stats),
-                "history_external": json.dumps(self.history),
                 "metrics_meta": json.dumps(self.metrics_meta),
             }
             conn.executemany(
@@ -1155,29 +1601,40 @@ class Store:
         }
 
     def stats(self) -> dict:
-        bases = []
-        rates = []
-        disabled = 0
-        for channel in self.channels.values():
-            policies = [channel.policy1, channel.policy2]
-            if policies[0] and policies[1] and policies[0].disabled and policies[1].disabled:
-                disabled += 1
-            for policy in policies:
-                if policy is not None and not policy.disabled:
-                    bases.append(policy.base_msat)
-                    rates.append(policy.ppm)
-        gossip_capacity = sum(channel.capacity or 0 for channel in self.channels.values())
+        aggregates = self._channel_aggregates()
+        rate = aggregates["fee_rate"]
+        base = aggregates["base_fee"]
+        gossip_capacity = aggregates["gossip_capacity"]
         reported = dict(self.network_stats)
+        latest = self.external_history[-1] if self.external_history else None
         return {
+            "network_latest": None
+            if latest is None
+            else {
+                "ts": latest["ts"],
+                "node_count": latest.get("node_count"),
+                "channel_count": latest.get("channel_count"),
+                "total_capacity": latest.get("total_capacity"),
+            },
             "gossip_nodes": len(self.by_node),
             "gossip_channels": len(self.channels),
-            "disabled_channels": disabled,
+            "enabled_channels": aggregates["enabled_channels"],
+            "disabled_channels": aggregates["disabled_channels"],
             "gossip_capacity": gossip_capacity,
             "capacity_coverage": self.capacity_coverage(),
-            "median_base_fee_msat": _median(bases) if bases else None,
-            "median_fee_rate_ppm": _median(rates) if rates else None,
-            "average_base_fee_msat": _mean(bases) if bases else None,
-            "average_fee_rate_ppm": _mean(rates) if rates else None,
+            "median_base_fee_msat": base["median"],
+            "median_fee_rate_ppm": rate["median"],
+            # The plain averages are outlier-filtered; the raw ones sit next to them.
+            "average_base_fee_msat": base["mean_filtered"],
+            "average_fee_rate_ppm": rate["mean_filtered"],
+            "raw_average_base_fee_msat": base["mean"],
+            "raw_average_fee_rate_ppm": rate["mean"],
+            "fees": {
+                "rate": rate,
+                "base": base,
+                "enabled_channels": aggregates["enabled_channels"],
+                "disabled_channels": aggregates["disabled_channels"],
+            },
             "reported": reported,
             "source": self.source,
             "updated_at": self.updated_at,

@@ -226,6 +226,18 @@ class Mempool:
     def statistics(self, interval: str = "latest"):
         return self._get(f"/v1/lightning/statistics/{interval}", timeout=30)
 
+    def statistics_all(self):
+        """Full network history back to March 2018, newest row first."""
+        return self._get("/v1/lightning/statistics/all", timeout=60)
+
+    def prices(self):
+        """Current exchange rates: {"time", "USD", "EUR", "GBP", ...}."""
+        return self._get("/v1/prices", timeout=20)
+
+    def historical_prices(self):
+        """~26k rows of {"time", "USD", "EUR", ...}; -1 marks unknown rates."""
+        return self._get("/v1/historical-price", timeout=60)
+
     def rankings(self, kind: str = "liquidity"):
         path = "/v1/lightning/nodes/rankings"
         if kind:
