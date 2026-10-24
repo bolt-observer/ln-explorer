@@ -1191,7 +1191,7 @@ async function renderNode(root, pubkey) {
       <h1>${esc(node.alias || "Unnamed node")}</h1>
       ${protocols(node)}
     </div>
-    <p>${pubkeyChip(node.pubkey)} ${node.city || node.country ? `<span class="hint">${esc([node.city, node.country].filter(Boolean).join(", "))}</span>` : ""}</p>
+    <p>${pubkeyChip(node.pubkey)} <a class="tag" href="/route?to=${node.pubkey}" title="Open the route explorer with this node as the receiver">Route to this node</a> ${node.city || node.country ? `<span class="hint">${esc([node.city, node.country].filter(Boolean).join(", "))}</span>` : ""}</p>
     ${featureBadges(node)}
     <div class="stats-row" style="margin-top:0.6rem">
       <div class="card">
@@ -1461,6 +1461,237 @@ async function renderSearch(root) {
             .join("")}</ul>`
         : ""
     }`;
+}
+
+// --- Route explorer ---------------------------------------------------------
+
+const ROUTE_DEFAULT_AMOUNT_SAT = 100000;
+const ROUTE_PUBKEY_RE = /^[0-9a-f]{66}$/;
+let routeSeq = 0;
+
+function routeHtlcWindow(path) {
+  const min = path.path_min_htlc > 0 ? `${num(path.path_min_htlc)} msat` : "any";
+  const max = path.path_max_htlc > 0 ? `${num(path.path_max_htlc)} msat` : "none announced";
+  return `${min} – ${max}`;
+}
+
+function routeHopRow(hop) {
+  const fromLabel = hop.from_alias || shortKey(hop.from);
+  const toLabel = hop.to_alias || shortKey(hop.to);
+  return `<tr>
+    <td class="left"><a href="/node/${hop.from}" title="${esc(hop.from)}">${esc(fromLabel)}</a> <span class="hint">→</span> <a href="/node/${hop.to}" title="${esc(hop.to)}">${esc(toLabel)}</a></td>
+    <td><a class="mono" href="/channel/${hop.scid}">${esc(hop.short_id)}</a></td>
+    <td>${num(hop.base_fee_msat)} msat + ${num(hop.fee_rate_ppm)} ppm</td>
+    <td>${hop.fee_msat > 0 ? `${num(hop.fee_msat)} msat` : '<span class="hint">0 (sender)</span>'}</td>
+    <td>${num(hop.amount_msat)} msat</td>
+    <td>${num(hop.cltv_delta)}</td>
+    <td>${hop.capacity != null ? sats(hop.capacity) : '<span class="hint">unknown</span>'}</td>
+  </tr>`;
+}
+
+function routeCard(path, index, best) {
+  const bottleneck =
+    path.bottleneck_capacity != null
+      ? fullSats(path.bottleneck_capacity)
+      : `unknown on ${num(path.unknown_capacity_hops)} hop${path.unknown_capacity_hops === 1 ? "" : "s"}`;
+  const note =
+    index === 0
+      ? "cheapest"
+      : `+${num(path.total_fee_msat - best.total_fee_msat)} msat vs route 1`;
+  return `<article class="card route-card">
+    <div class="route-head">
+      <h2>Route ${index + 1}</h2>
+      <span class="hint">${esc(note)}</span>
+    </div>
+    <div class="kv">
+      <div><div class="k">Total fee</div><div class="v">${num(path.total_fee_msat)} msat · ${num(path.total_fee_ppm, 1)} ppm</div></div>
+      <div><div class="k">Hops</div><div class="v">${num(path.hop_count)}</div></div>
+      <div><div class="k">Total CLTV</div><div class="v">${num(path.total_cltv)}</div></div>
+      <div><div class="k">Bottleneck capacity</div><div class="v">${esc(bottleneck)}</div></div>
+      <div><div class="k">HTLC limits</div><div class="v">${esc(routeHtlcWindow(path))}</div></div>
+    </div>
+    <table>
+      <thead><tr>
+        <th class="left">Hop (from → to)</th><th>Channel</th><th title="Fee policy of the forwarding node">Fee policy</th><th>Fee charged</th><th>Amount forwarded</th><th>CLTV Δ</th><th>Capacity</th>
+      </tr></thead>
+      <tbody>${path.hops.map(routeHopRow).join("")}</tbody>
+    </table>
+    <p class="hint">Fees are computed backwards like a real payment: each hop forwards the next hop's amount plus its fee, and the sender's own first channel charges nothing.</p>
+  </article>`;
+}
+
+// A sigma mini-graph of just the found paths: route 1 in mint through the
+// middle, alternates branching above and below it, endpoints in yellow.
+// Reuses the global renderer so destroyGraph() cleans it up on navigation.
+function drawRouteGraph(paths) {
+  const container = document.getElementById("route-sigma");
+  if (!container) return;
+  try {
+    const source = paths[0].hops[0].from;
+    const target = paths[0].hops[paths[0].hops.length - 1].to;
+    const aliases = new Map();
+    const xSum = new Map();
+    const xCount = new Map();
+    const tier = new Map();
+    paths.forEach((path, index) => {
+      const nodes = [path.hops[0].from, ...path.hops.map((hop) => hop.to)];
+      const last = nodes.length - 1;
+      nodes.forEach((pubkey, position) => {
+        xSum.set(pubkey, (xSum.get(pubkey) || 0) + (last ? position / last : 0));
+        xCount.set(pubkey, (xCount.get(pubkey) || 0) + 1);
+        if (!tier.has(pubkey)) tier.set(pubkey, index);
+      });
+      path.hops.forEach((hop) => {
+        if (!aliases.get(hop.from) && hop.from_alias) aliases.set(hop.from, hop.from_alias);
+        if (!aliases.get(hop.to) && hop.to_alias) aliases.set(hop.to, hop.to_alias);
+      });
+    });
+    const graph = new Graph({ type: "undirected", multi: false });
+    for (const pubkey of xSum.keys()) {
+      const level = tier.get(pubkey) || 0;
+      let y = 0;
+      if (level > 0) {
+        let hash = 0;
+        for (let i = 0; i < pubkey.length; i += 1) hash = (hash * 33 + pubkey.charCodeAt(i)) >>> 0;
+        const side = level % 2 === 1 ? 1 : -1;
+        y = side * (1.2 + Math.floor((level - 1) / 2) * 1.7) + (hash / 0xffffffff - 0.5) * 0.8;
+      }
+      const endpoint = pubkey === source || pubkey === target;
+      graph.addNode(pubkey, {
+        x: (xSum.get(pubkey) / xCount.get(pubkey)) * 12,
+        y,
+        size: endpoint ? 9 : 6,
+        label: aliases.get(pubkey) || shortKey(pubkey),
+        color: endpoint ? "#FAD228" : level === 0 ? "#1DFEBB" : "#7ddec4",
+        forceLabel: endpoint,
+      });
+    }
+    // First (cheapest) route wins a shared edge, both for colour and click.
+    const edges = new Map();
+    paths.forEach((path, index) => {
+      path.hops.forEach((hop) => {
+        if (!edges.has(hop.scid)) edges.set(hop.scid, { a: hop.from, b: hop.to, index });
+      });
+    });
+    for (const [scid, edge] of edges) {
+      if (edge.a === edge.b || graph.hasEdge(edge.a, edge.b)) continue;
+      graph.addEdgeWithKey(scid, edge.a, edge.b, {
+        size: edge.index === 0 ? 3.2 : 2,
+        color: edge.index === 0 ? "#1DFEBB" : "#128f6a",
+        scid,
+      });
+    }
+    renderer = new Sigma(graph, container, {
+      renderLabels: true,
+      labelRenderedSizeThreshold: 7,
+      labelSize: 13,
+      labelWeight: "600",
+      labelColor: { color: "#ffffff" },
+      defaultEdgeColor: "#1DFEBB",
+      minEdgeThickness: 0.6,
+      enableEdgeEvents: true,
+      allowInvalidContainer: true,
+    });
+    renderer.on("clickNode", ({ node }) => go(`/node/${node}`));
+    renderer.on("clickEdge", ({ edge }) => {
+      const scid = graph.getEdgeAttribute(edge, "scid");
+      if (scid) go(`/channel/${scid}`);
+    });
+  } catch (error) {
+    console.warn("Route mini-graph failed", error);
+    const wrap = container.closest(".route-graph");
+    if (wrap) wrap.innerHTML = `<p class="hint" style="padding:1rem">The route map needs WebGL; the tables below list every hop.</p>`;
+  }
+}
+
+function renderRouteResults(host, payload, amountSat) {
+  const timedNote = payload.timed_out
+    ? "the search hit its time budget, so these are the best routes found before the cutoff"
+    : "";
+  if (!payload.paths.length) {
+    host.innerHTML = `<section class="card">
+      <h2>No route found</h2>
+      <p class="empty">${esc(payload.reason || "No path connects these nodes for this amount.")}</p>
+      ${timedNote ? `<p class="hint">Note: ${esc(timedNote)}.</p>` : ""}
+    </section>`;
+    return;
+  }
+  const first = payload.paths[0].hops[0];
+  const lastHop = payload.paths[0].hops[payload.paths[0].hops.length - 1];
+  host.innerHTML = `
+    <section class="card" style="margin-bottom:0.8rem">
+      <div class="chart-head">
+        <h2>Route map</h2>
+        <span class="hint">${esc(first.from_alias || shortKey(first.from))} → ${esc(lastHop.to_alias || shortKey(lastHop.to))} · ${fullSats(amountSat)}</span>
+      </div>
+      <div class="route-graph"><div id="route-sigma"></div></div>
+      <p class="chart-legend hint"><span class="legend-line solid"></span> route 1 (cheapest)&nbsp;&nbsp;<span class="legend-line solid dim"></span> alternate routes&nbsp;&nbsp;<span class="legend-line solid" style="border-top-color:#FAD228"></span> sender / receiver · click a node or a channel</p>
+    </section>
+    <p class="hint" style="margin:0 0 0.6rem">${payload.paths.length} route${payload.paths.length === 1 ? "" : "s"} in ${num(payload.elapsed_ms)} ms${timedNote ? ` · ${esc(timedNote)}` : ""}</p>
+    ${payload.paths.map((path, index) => routeCard(path, index, payload.paths[0])).join("")}`;
+  drawRouteGraph(payload.paths);
+}
+
+async function renderRoute(root) {
+  const params = new URLSearchParams(location.search);
+  const from = (params.get("from") || "").trim().toLowerCase();
+  const to = (params.get("to") || "").trim().toLowerCase();
+  const rawAmount = Number(params.get("amount"));
+  const amount =
+    Number.isFinite(rawAmount) && rawAmount >= 1 && Number.isInteger(rawAmount)
+      ? rawAmount
+      : ROUTE_DEFAULT_AMOUNT_SAT;
+  root.innerHTML = `
+    <div class="title-row"><h1>Route explorer</h1></div>
+    <section class="card filters">
+      <form id="route-form" class="filter-row">
+        <label class="field">From (sender)
+          <input id="route-from" type="text" value="${esc(from)}" placeholder="pubkey or alias" style="min-width:16rem" />
+        </label>
+        <label class="field">To (receiver)
+          <input id="route-to" type="text" value="${esc(to)}" placeholder="pubkey or alias" style="min-width:16rem" />
+        </label>
+        <label class="field">Amount [sat]
+          <input id="route-amount" type="number" min="1" step="1" value="${esc(amount)}" style="width:9rem" />
+        </label>
+        <button class="btn" type="submit">Find routes</button>
+      </form>
+      <p class="hint">Up to five cheapest routes over the live channel graph for the amount. A hop is only used when its fee policy, HTLC limits, and known capacity admit the amount. The query lives in the URL, so links are shareable.</p>
+    </section>
+    <div id="route-results"><p class="hint">${from && to ? "Searching routes…" : "Pick a sender and a receiver (type an alias to autocomplete a pubkey), then Find routes."}</p></div>`;
+  attachAutocomplete(document.getElementById("route-from"));
+  attachAutocomplete(document.getElementById("route-to"));
+  document.getElementById("route-form").onsubmit = (event) => {
+    event.preventDefault();
+    const next = new URLSearchParams();
+    const f = document.getElementById("route-from").value.trim().toLowerCase();
+    const t = document.getElementById("route-to").value.trim().toLowerCase();
+    const a = Number(document.getElementById("route-amount").value);
+    if (f) next.set("from", f);
+    if (t) next.set("to", t);
+    next.set(
+      "amount",
+      String(Number.isFinite(a) && a >= 1 ? Math.round(a) : ROUTE_DEFAULT_AMOUNT_SAT)
+    );
+    go(`/route?${next.toString()}`);
+  };
+  if (!from || !to) return;
+  const host = document.getElementById("route-results");
+  if (!ROUTE_PUBKEY_RE.test(from) || !ROUTE_PUBKEY_RE.test(to)) {
+    host.innerHTML = `<p class="empty">Sender and receiver must be node pubkeys (66 hex characters). Type an alias to autocomplete one.</p>`;
+    return;
+  }
+  const seq = (routeSeq += 1);
+  try {
+    const payload = await api(
+      `/api/route?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&amount_sat=${amount}&k=5`
+    );
+    if (seq !== routeSeq || !host.isConnected) return;
+    renderRouteResults(host, payload, amount);
+  } catch (error) {
+    if (seq !== routeSeq || !host.isConnected) return;
+    host.innerHTML = `<p class="empty">${esc(error.message)}</p>`;
+  }
 }
 
 const PANEL_HEIGHT = 112;
@@ -2005,6 +2236,11 @@ async function draw() {
     if (parts[0] === "nodes") {
       setNav("nodes");
       await renderNodes(app);
+      return;
+    }
+    if (parts[0] === "route") {
+      setNav("route");
+      await renderRoute(app);
       return;
     }
     if (parts[0] === "rankings") {

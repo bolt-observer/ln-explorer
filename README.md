@@ -45,6 +45,7 @@ Change history comes from diffing consecutive snapshots: channel opens (a channe
 
 - `/` interactive WebGL graph (sigma.js). Click a node or an edge.
 - `/nodes` filterable node table: capacity, fees, protocols, centrality ranks, optional reference node, multi-condition filter builder.
+- `/route?from=&to=&amount=` cheapest routes for an amount (up to five cards with per-hop fees and a mini-graph of the paths).
 - `/node/<pubkey>` channels (sortable, text/state filter, fiat column), policies, and a shortest-path lookup.
 - `/channel/<scid>` both directions. `blockxindexxoutput` and the numeric id both work.
 - `/stats` gossip totals, fee distribution, opens/closes from snapshot diffs, multi-year history chart (mempool.space plus own snapshots), top nodes.
