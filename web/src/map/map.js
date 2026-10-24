@@ -356,7 +356,10 @@ function wireRotation() {
   };
   const onUp = () => {
     if (!drag) return;
-    swallowClick = drag.moved;
+    // A left-button release fires one click right after mouseup; swallow just
+    // that one. Right-button releases fire no click, so nothing is armed.
+    swallowClick = drag.moved && drag.button === 0;
+    if (swallowClick) setTimeout(() => (swallowClick = false), 0);
     drag = null;
     el.classList.remove("rotating");
     window.removeEventListener("mousemove", onMove, true);
@@ -376,7 +379,7 @@ function wireRotation() {
       event.preventDefault();
       event.stopPropagation();
       hideTip();
-      drag = { start: s.renderer.getCamera().getState().angle, from: pointerAngle(event), moved: false };
+      drag = { start: s.renderer.getCamera().getState().angle, from: pointerAngle(event), moved: false, button: event.button };
       el.classList.add("rotating");
       window.addEventListener("mousemove", onMove, true);
       window.addEventListener("mouseup", onUp, true);
