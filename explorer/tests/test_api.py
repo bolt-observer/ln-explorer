@@ -64,6 +64,28 @@ class ApiTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_icons_are_served_and_shipped(self):
+        """Every icon the HTML or manifest references exists, is an image, and is in the image."""
+        import re
+        root = Path(__file__).resolve().parents[2]
+        html = self.client.get("/").get_data(as_text=True)
+        links = re.findall(r'<link rel="(?:icon|apple-touch-icon|manifest)"[^>]*href="([^"]+)"', html)
+        manifest_href = next(href for href in links if "manifest" in href)
+        manifest = self.client.get(manifest_href).get_json()
+        sizes = {icon["sizes"] for icon in manifest["icons"]}
+        self.assertTrue({"192x192", "512x512"} <= sizes)
+        self.assertTrue(any(icon.get("purpose") == "maskable" for icon in manifest["icons"]))
+        hrefs = [href for href in links if href != manifest_href]
+        hrefs += [icon["src"] for icon in manifest["icons"]] + ["/favicon.ico"]
+        self.assertIn("/favicon.ico?v=", " ".join(links))
+        docker = (root / "Dockerfile").read_text(encoding="utf-8")
+        for href in hrefs:
+            with self.subTest(href=href):
+                response = self.client.get(href)
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.mimetype.startswith("image/"), response.mimetype)
+                self.assertIn("web/" + href.split("?")[0].lstrip("/"), docker)
+
     def test_health_and_pages(self):
         health = self.client.get("/api/health")
         self.assertEqual(health.status_code, 200)
