@@ -1137,6 +1137,110 @@ function channelCell(field, channel, fiat, price, fiatFormat) {
   }
 }
 
+// --- Peer overlap and who-to-connect suggestions (P10) ---------------------
+
+const SUGGEST_SORTS = [
+  ["betweenness", "Betweenness"],
+  ["eigenvector", "Eigenvector"],
+  ["capacity", "Capacity"],
+];
+const SUGGEST_HOPS = [2, 3, 4];
+let overlapSeq = 0;
+let suggestSeq = 0;
+
+function pct(value, digits = 1) {
+  const n = Number(value);
+  if (value === null || value === undefined || !Number.isFinite(n)) return "—";
+  return `${(n * 100).toFixed(digits)}%`;
+}
+
+function renderOverlap(payload) {
+  const otherName = esc(payload.b_alias || shortKey(payload.b));
+  const shared = payload.shared.length
+    ? `<ul class="side-list" style="max-height:15rem;overflow:auto;margin-top:0.4rem">${payload.shared
+        .map(
+          (peer) =>
+            `<li><a href="/node/${peer.pubkey}" title="${esc(peer.pubkey)}">${esc(peer.alias || shortKey(peer.pubkey))}</a><span class="hint">${num(peer.num_channels)} ch</span></li>`
+        )
+        .join("")}</ul>`
+    : `<p class="hint">No shared peers.</p>`;
+  const more =
+    payload.shared_peers > payload.shared.length
+      ? `<p class="hint">Showing the ${payload.shared.length} busiest of ${num(payload.shared_peers)} shared peers.</p>`
+      : "";
+  return `
+    <p class="hint">This node has ${num(payload.a_peers)} peers, ${otherName} has ${num(payload.b_peers)} (union ${num(payload.union)}).</p>
+    ${statRows([
+      ["Shared peers", num(payload.shared_peers)],
+      ["Share of this node's peers", pct(payload.overlap_a)],
+      [`Share of ${otherName}'s peers`, pct(payload.overlap_b)],
+      ["Jaccard (shared ÷ union)", num(payload.jaccard, 3)],
+    ])}
+    ${shared}
+    ${more}`;
+}
+
+function renderSuggestions(host, payload, pubkey) {
+  const metricField = payload.sort === "capacity" ? null : `${payload.sort}_rank`;
+  const label = SUGGEST_SORTS.find(([value]) => value === payload.sort);
+  const rows = payload.suggestions
+    .map(
+      (row) => `<tr>
+        <td class="left"><a href="/node/${row.pubkey}" title="${esc(row.pubkey)}">${esc(row.alias || shortKey(row.pubkey))}</a></td>
+        <td>${num(row.hops)}</td>
+        <td>${sats(row.capacity)}</td>
+        <td>${num(row.channels)}</td>
+        ${metricField ? `<td>${num(row[metricField])}</td>` : ""}
+        <td title="Peers of this node currently 2+ hops away or unreachable - the reach a channel would add">${num(row.new_peers)}</td>
+        <td><a href="/route?from=${pubkey}&to=${row.pubkey}">route</a></td>
+      </tr>`
+    )
+    .join("");
+  host.innerHTML = `
+    <p class="hint">${num(payload.candidates)} candidates: nodes with at least ${num(payload.min_channels)} channels, at least ${num(payload.min_hops)} hops away, best ${esc(label ? label[1].toLowerCase() : payload.sort)} first.</p>
+    ${
+      rows
+        ? `<table>
+      <thead><tr>
+        <th class="left">Node</th>
+        <th>Hops</th>
+        <th>Capacity [sat]</th>
+        <th>Channels</th>
+        ${metricField ? `<th>${esc(label[1])} rank</th>` : ""}
+        <th title="Peers of this node currently 2+ hops away or unreachable">New peers</th>
+        <th>Route</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`
+        : `<p class="empty">No candidates: every node at ${num(payload.min_hops)}+ hops has fewer than ${num(payload.min_channels)} channels.</p>`
+    }`;
+}
+
+// Loads after the node content itself is on screen, like the history card.
+async function loadSuggestions(pubkey) {
+  const host = document.getElementById("suggest-result");
+  const sortSelect = document.getElementById("sg-sort");
+  const hopsSelect = document.getElementById("sg-hops");
+  if (!host || !sortSelect || !hopsSelect) return;
+  const run = async () => {
+    const seq = (suggestSeq += 1);
+    host.innerHTML = `<p class="hint">Finding candidates…</p>`;
+    try {
+      const payload = await api(
+        `/api/suggest?pubkey=${encodeURIComponent(pubkey)}&min_hops=${hopsSelect.value}&sort=${sortSelect.value}&limit=20`
+      );
+      if (seq !== suggestSeq || !host.isConnected) return;
+      renderSuggestions(host, payload, pubkey);
+    } catch (error) {
+      if (seq !== suggestSeq || !host.isConnected) return;
+      host.innerHTML = `<p class="hint">${esc(error.message)}</p>`;
+    }
+  };
+  sortSelect.onchange = run;
+  hopsSelect.onchange = run;
+  await run();
+}
+
 async function renderNode(root, pubkey) {
   root.innerHTML = `<p class="hint">Loading node…</p>`;
   const node = await api(`/api/nodes/${pubkey}`);
@@ -1278,6 +1382,34 @@ async function renderNode(root, pubkey) {
       <button class="btn" type="submit">Find path</button>
       <span id="path-result" class="hint"></span>
     </form>
+    <div class="two">
+      <section class="card">
+        <h2>Peer overlap</h2>
+        <form id="overlap-form" class="filter-row">
+          <label class="field">Compare with
+            <input id="overlap-other" type="text" placeholder="another node's alias or pubkey" style="min-width:14rem" />
+          </label>
+          <button class="btn" type="submit">Compare</button>
+        </form>
+        <div id="overlap-result"><p class="hint">Pick another node to see which peers the two of you share.</p></div>
+      </section>
+      <section class="card">
+        <h2>Who to connect to</h2>
+        <div class="filter-row">
+          <label class="field">Sort by
+            <select id="sg-sort">${SUGGEST_SORTS.map(
+              ([value, name]) => `<option value="${value}"${value === "betweenness" ? " selected" : ""}>${name}</option>`
+            ).join("")}</select>
+          </label>
+          <label class="field">Min hops away
+            <select id="sg-hops">${SUGGEST_HOPS.map(
+              (hops) => `<option value="${hops}"${hops === 2 ? " selected" : ""}>${hops}+</option>`
+            ).join("")}</select>
+          </label>
+        </div>
+        <div id="suggest-result"><p class="hint">Finding candidates…</p></div>
+      </section>
+    </div>
     <div class="card" id="channels-card">
       <div class="table-tools">
         <h2 style="margin:0">Channels</h2>
@@ -1328,6 +1460,26 @@ async function renderNode(root, pubkey) {
     </div>
     <div class="card" id="node-history"><h2>History</h2><p class="hint">Loading events…</p></div>`;
   attachAutocomplete(document.getElementById("path-from"));
+  attachAutocomplete(document.getElementById("overlap-other"));
+  document.getElementById("overlap-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const other = document.getElementById("overlap-other").value.trim().toLowerCase();
+    const host = document.getElementById("overlap-result");
+    const seq = (overlapSeq += 1);
+    if (!ROUTE_PUBKEY_RE.test(other)) {
+      host.innerHTML = `<p class="hint">Type an alias and pick a node from the suggestions, or paste a 66-character pubkey.</p>`;
+      return;
+    }
+    host.innerHTML = `<p class="hint">Comparing peer sets…</p>`;
+    try {
+      const payload = await api(`/api/overlap?a=${encodeURIComponent(pubkey)}&b=${encodeURIComponent(other)}`);
+      if (seq !== overlapSeq || !host.isConnected) return;
+      host.innerHTML = renderOverlap(payload);
+    } catch (error) {
+      if (seq !== overlapSeq || !host.isConnected) return;
+      host.innerHTML = `<p class="hint">${esc(error.message)}</p>`;
+    }
+  };
   document.getElementById("path-form").onsubmit = async (event) => {
     event.preventDefault();
     const source = document.getElementById("path-from").value.trim();
@@ -1393,6 +1545,7 @@ async function renderNode(root, pubkey) {
     (next) => `/node/${pubkey}?${next.toString()}`
   );
   fillNodeHistory(pubkey);
+  loadSuggestions(pubkey);
 }
 
 function policyBlock(side) {
