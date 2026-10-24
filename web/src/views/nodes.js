@@ -1,7 +1,7 @@
 // "/nodes" — every public node in a sortable, filterable table on a left sheet
 // over the live map. All filter, sort and page state lives in the URL and maps
 // one-to-one onto /api/nodes parameters; changes re-fetch the table only.
-import { api, cached, isAbort } from "../lib/api.js";
+import { anySignal, api, cached, isAbort } from "../lib/api.js";
 import { baseFee, btc, btcHtml, date, esc, int, num, shortKey } from "../lib/format.js";
 import { icon } from "../lib/icons.js";
 import { go, homeUrl, setQuery } from "../lib/router.js";
@@ -828,7 +828,7 @@ export async function mount(ctx) {
     fetchCtrl?.abort();
     const mine = new AbortController();
     fetchCtrl = mine;
-    const signal = AbortSignal.any([ctx.signal, mine.signal]);
+    const signal = anySignal([ctx.signal, mine.signal]);
     resolveReference();
     if (!data) renderTable();
     sheet.body.setAttribute("aria-busy", "true");
