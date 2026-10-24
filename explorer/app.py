@@ -29,6 +29,7 @@ from explorer.store import (
     FILTER_FIELDS,
     FILTER_RELATIONS,
     SORT_FIELDS,
+    SUGGESTION_SORTS,
     FilterError,
     Store,
     filter_fields_payload,
@@ -544,6 +545,52 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
                 "timed_out": result["timed_out"],
                 "elapsed_ms": result["elapsed_ms"],
             }
+        )
+
+    @app.get("/api/overlap")
+    def overlap():
+        """Shared-peer overlap between two nodes (the original get_overlap)."""
+        a = (request.args.get("a") or "").strip().lower()
+        b = (request.args.get("b") or "").strip().lower()
+        if not PUBKEY_RE.match(a) or not PUBKEY_RE.match(b):
+            return jsonify({"error": "a and b must be node pubkeys"}), 400
+        if a == b:
+            return jsonify({"error": "a and b must differ"}), 400
+        result = store.overlap(a, b)
+        if result is None:
+            return jsonify({"error": "node not found"}), 404
+        return jsonify(result)
+
+    @app.get("/api/suggest")
+    def suggest():
+        """Who to connect to: well-connected nodes at min_hops or more hops."""
+        pubkey = (request.args.get("pubkey") or "").strip().lower()
+        if not PUBKEY_RE.match(pubkey):
+            return jsonify({"error": "pubkey must be a node pubkey"}), 400
+        if pubkey not in store.nodes:
+            return jsonify({"error": "node not found"}), 404
+        sort = (request.args.get("sort") or "betweenness").strip()
+        if sort not in SUGGESTION_SORTS:
+            return jsonify(
+                {
+                    "error": "sort must be one of "
+                    + ", ".join(sorted(SUGGESTION_SORTS))
+                }
+            ), 400
+        try:
+            min_hops = int((request.args.get("min_hops") or "2").strip())
+        except ValueError:
+            return jsonify({"error": "min_hops must be an integer"}), 400
+        if not 1 <= min_hops <= 6:
+            return jsonify({"error": "min_hops must be between 1 and 6"}), 400
+        try:
+            limit = int((request.args.get("limit") or "20").strip())
+        except ValueError:
+            return jsonify({"error": "limit must be an integer"}), 400
+        if not 1 <= limit <= 100:
+            return jsonify({"error": "limit must be between 1 and 100"}), 400
+        return jsonify(
+            store.suggestions(pubkey, min_hops=min_hops, limit=limit, sort=sort)
         )
 
     def index_html() -> str:
