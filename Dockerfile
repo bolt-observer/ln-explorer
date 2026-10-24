@@ -16,7 +16,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY explorer ./explorer
-COPY web/index.html web/logo.svg web/favicon.png web/apple-touch-icon.png web/icon-192.png web/manifest.webmanifest ./web/
+COPY web/index.html web/logo.svg web/favicon.ico web/favicon.svg web/favicon.png web/apple-touch-icon.png web/icon-192.png web/icon-512.png web/manifest.webmanifest ./web/
 COPY web/fonts ./web/fonts
 COPY web/static ./web/static
 
