@@ -219,7 +219,8 @@ export function create(container, hooks) {
     st.ticks = WARMUP_TICKS;
     refreshStyles();
     writePositions();
-    if (!st.touched) reset(0);
+    st.touched = false; // a new graph gets a fresh frame; later focus() calls re-touch
+    reset(0);
     kick();
   }
 
