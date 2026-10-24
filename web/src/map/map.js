@@ -64,6 +64,20 @@ function trimLabel(text) {
 let frameLabels = [];
 const overlaps = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
+// CanvasRenderingContext2D.roundRect is missing in Safari < 16 and Firefox < 112.
+function roundedRect(ctx, x, y, w, h, r) {
+  if (typeof ctx.roundRect === "function") {
+    ctx.roundRect(x, y, w, h, r);
+    return;
+  }
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
 function drawLabel(ctx, data, settings, force = false) {
   if (!data.label) return;
   const text = trimLabel(data.label);
@@ -73,7 +87,7 @@ function drawLabel(ctx, data, settings, force = false) {
     const x = data.x + data.size + 7;
     ctx.fillStyle = ACCENT;
     ctx.beginPath();
-    ctx.roundRect(x, data.y - 12, w, 24, 7);
+    roundedRect(ctx, x, data.y - 12, w, 24, 7);
     ctx.fill();
     ctx.fillStyle = "#02281d";
     ctx.fillText(text, x + 9, data.y + 4.5);

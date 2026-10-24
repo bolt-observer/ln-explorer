@@ -17,6 +17,23 @@ export async function api(path, { signal } = {}) {
   return response.json();
 }
 
+/** AbortSignal.any with a fallback for browsers without it (Safari < 17.4, Chrome < 116, Firefox < 124). */
+export function anySignal(signals) {
+  if (typeof AbortSignal.any === "function") return AbortSignal.any(signals);
+  const controller = new AbortController();
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+    signal.addEventListener("abort", () => controller.abort(signal.reason), {
+      once: true,
+      signal: controller.signal,
+    });
+  }
+  return controller.signal;
+}
+
 export const isAbort = (error) => error && error.name === "AbortError";
 
 // Short-lived cache for payloads many views share (network stats).
