@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 import statistics
 import threading
@@ -72,6 +73,7 @@ EXTERNAL_HISTORY_COLUMNS = (
 
 SORT_FIELDS = {
     "alias",
+    "first_seen",
     "num_channels",
     "active_channels",
     "total_capacity",
@@ -95,6 +97,200 @@ SORT_FIELDS = {
     "eigenvector_rank",
     "eigenvector_weighted_rank",
 }
+
+# Sort keys and states for the per-node channel table. "age" is the
+# approximate channel age in days (funding block distance to the newest
+# block in the graph); missing values sort last for every key.
+CHANNEL_SORT_FIELDS = frozenset(
+    {
+        "capacity",
+        "peer_alias",
+        "out_ppm",
+        "in_ppm",
+        "out_base",
+        "in_base",
+        "cltv",
+        "age",
+        "short_id",
+    }
+)
+CHANNEL_STATES = frozenset({"all", "active", "disabled"})
+BLOCKS_PER_DAY = 144
+
+# --- Node condition filters -------------------------------------------------
+#
+# /api/nodes filters on a whitelist of numeric/boolean per-node fields. The
+# flat ``condition=field|rel|value`` list is kept for old links; new clients
+# send one nested group as JSON in ``filter=`` (and/or/not, at most
+# FILTER_MAX_DEPTH levels and FILTER_MAX_LEAVES conditions). "not" negates
+# the OR of its items, like the original explorer's chain_not.
+FILTER_RELATIONS = frozenset({"gt", "lt", "eq", "gte", "lte", "neq"})
+FILTER_MAX_DEPTH = 3
+FILTER_MAX_LEAVES = 20
+FILTER_OPS = frozenset({"and", "or", "not"})
+
+# Order matters: /api/filter-fields serves this list to the UI so the labels
+# live in one place. "unit" describes the field for humans (sats, ppm, ...).
+FILTER_FIELDS: dict[str, dict] = {
+    "num_channels": {"label": "Channels", "unit": None, "kind": "number"},
+    "active_channels": {"label": "Active channels", "unit": None, "kind": "number"},
+    "total_capacity": {"label": "Total capacity", "unit": "sat", "kind": "number"},
+    "avg_capacity": {"label": "Average channel capacity", "unit": "sat", "kind": "number"},
+    "med_capacity": {"label": "Median channel capacity", "unit": "sat", "kind": "number"},
+    "max_capacity": {"label": "Max channel capacity", "unit": "sat", "kind": "number"},
+    "avg_out_ppm": {"label": "Average outgoing fee rate", "unit": "ppm", "kind": "number"},
+    "med_out_ppm": {"label": "Median outgoing fee rate", "unit": "ppm", "kind": "number"},
+    "max_out_ppm": {"label": "Max outgoing fee rate", "unit": "ppm", "kind": "number"},
+    "avg_in_ppm": {"label": "Average incoming fee rate", "unit": "ppm", "kind": "number"},
+    "med_in_ppm": {"label": "Median incoming fee rate", "unit": "ppm", "kind": "number"},
+    "avg_out_base": {"label": "Average outgoing base fee", "unit": "msat", "kind": "number"},
+    "med_out_base": {"label": "Median outgoing base fee", "unit": "msat", "kind": "number"},
+    "max_out_base": {"label": "Max outgoing base fee", "unit": "msat", "kind": "number"},
+    "avg_in_base": {"label": "Average incoming base fee", "unit": "msat", "kind": "number"},
+    "med_in_base": {"label": "Median incoming base fee", "unit": "msat", "kind": "number"},
+    "betweenness_rank": {"label": "Betweenness rank", "unit": None, "kind": "number"},
+    "betweenness_weighted_rank": {
+        "label": "Betweenness rank (weighted)",
+        "unit": None,
+        "kind": "number",
+    },
+    "closeness_rank": {"label": "Closeness rank", "unit": None, "kind": "number"},
+    "closeness_weighted_rank": {
+        "label": "Closeness rank (weighted)",
+        "unit": None,
+        "kind": "number",
+    },
+    "eigenvector_rank": {"label": "Eigenvector rank", "unit": None, "kind": "number"},
+    "eigenvector_weighted_rank": {
+        "label": "Eigenvector rank (weighted)",
+        "unit": None,
+        "kind": "number",
+    },
+    "shortest_path": {"label": "Hops to reference node", "unit": None, "kind": "number"},
+    "first_seen": {"label": "First seen", "unit": "unix", "kind": "number"},
+    "ipv4": {"label": "IPv4", "unit": None, "kind": "bool"},
+    "ipv6": {"label": "IPv6", "unit": None, "kind": "bool"},
+    "tor": {"label": "Tor", "unit": None, "kind": "bool"},
+    "wumbo": {"label": "Wumbo (large channels)", "unit": None, "kind": "bool"},
+    "anchors": {"label": "Anchor channels", "unit": None, "kind": "bool"},
+    "dual_fund": {"label": "Dual funding", "unit": None, "kind": "bool"},
+    "onion_messages": {"label": "Onion messages", "unit": None, "kind": "bool"},
+    "route_blinding": {"label": "Route blinding", "unit": None, "kind": "bool"},
+}
+
+
+class FilterError(ValueError):
+    """Invalid condition input; the API maps this to HTTP 400."""
+
+
+def _filter_leaf(item) -> dict:
+    """Validate one ``{field, rel, value}`` leaf, strictly."""
+    if not isinstance(item, dict):
+        raise FilterError("each condition must be an object with field, rel and value")
+    if set(item) != {"field", "rel", "value"}:
+        raise FilterError("each condition must have exactly the keys field, rel and value")
+    field_name = item["field"]
+    if not isinstance(field_name, str) or field_name not in FILTER_FIELDS:
+        raise FilterError(f"unknown filter field: {field_name!r}")
+    relation = item["rel"]
+    if not isinstance(relation, str) or relation not in FILTER_RELATIONS:
+        raise FilterError(
+            "unknown relation: "
+            f"{relation!r} (use one of {', '.join(sorted(FILTER_RELATIONS))})"
+        )
+    value = item["value"]
+    if isinstance(value, bool):
+        value = 1 if value else 0
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise FilterError(f"condition value for {field_name} must be a finite number")
+    return {"field": field_name, "rel": relation, "value": float(value)}
+
+
+def validate_filter_tree(group, depth: int = 1) -> dict:
+    """Validate and normalise a nested ``{op, items}`` filter group.
+
+    Groups nest at most FILTER_MAX_DEPTH levels and hold at most
+    FILTER_MAX_LEAVES conditions in total; leaves must name a whitelisted
+    field (leaves may sit at any group depth). Raises FilterError with a
+    plain-language message otherwise.
+    """
+    if not isinstance(group, dict):
+        raise FilterError("filter must be an object with op and items")
+    if set(group) != {"op", "items"}:
+        # A leaf at the top level or inside the deepest allowed group.
+        return _filter_leaf(group)
+    if depth > FILTER_MAX_DEPTH:
+        raise FilterError(f"filter may nest at most {FILTER_MAX_DEPTH} levels")
+    op = group["op"]
+    if op not in FILTER_OPS:
+        raise FilterError(f'filter op must be one of {", ".join(sorted(FILTER_OPS))}')
+    items = group["items"]
+    if not isinstance(items, list) or not items:
+        raise FilterError('filter "items" must be a non-empty list')
+    normalized = {
+        "op": op,
+        "items": [validate_filter_tree(item, depth + 1) for item in items],
+    }
+    if _filter_leaf_count(normalized) > FILTER_MAX_LEAVES:
+        raise FilterError(f"filter may hold at most {FILTER_MAX_LEAVES} conditions")
+    return normalized
+
+
+def _filter_leaf_count(group: dict) -> int:
+    return sum(
+        _filter_leaf_count(item) if "op" in item else 1 for item in group["items"]
+    )
+
+
+def _condition_matches(record: dict, leaf: dict) -> bool:
+    """One ``{field, rel, value}`` leaf against a node record.
+
+    Booleans compare as 1/0. A node with an unknown value (no centrality
+    rank yet, feature bits never learned, no reference node selected for
+    shortest_path) matches nothing.
+    """
+    current = record.get(leaf["field"])
+    if isinstance(current, bool):
+        current = 1.0 if current else 0.0
+    if current is None or current == "":
+        return False
+    try:
+        current = float(current)
+    except (TypeError, ValueError):
+        return False
+    target = leaf["value"]
+    relation = leaf["rel"]
+    if relation == "gt":
+        return current > target
+    if relation == "lt":
+        return current < target
+    if relation == "eq":
+        return current == target
+    if relation == "gte":
+        return current >= target
+    if relation == "lte":
+        return current <= target
+    return current != target  # neq
+
+
+def _filter_tree_matches(record: dict, group: dict) -> bool:
+    """Evaluate a validated group; "not" negates the OR of its items."""
+    if "op" not in group:
+        return _condition_matches(record, group)
+    op = group["op"]
+    if op == "not":
+        return not any(_filter_tree_matches(record, item) for item in group["items"])
+    if op == "and":
+        return all(_filter_tree_matches(record, item) for item in group["items"])
+    return any(_filter_tree_matches(record, item) for item in group["items"])
+
+
+def filter_fields_payload() -> list[dict]:
+    """The filter whitelist with UI labels, served by /api/filter-fields."""
+    return [
+        {"field": name, "label": meta["label"], "unit": meta["unit"], "kind": meta["kind"]}
+        for name, meta in FILTER_FIELDS.items()
+    ]
 
 # --- Change events (snapshot diffs) ---------------------------------------
 #
@@ -1982,6 +2178,21 @@ class Store:
             latest = {"day": day, "usd": usd, "eur": eur}
         return {"current": dict(self.current_prices), "latest_daily": latest}
 
+    def price_block(self) -> dict | None:
+        """USD/EUR from the latest /v1/prices payload, or None without prices."""
+        prices = self.current_prices
+
+        def pick(code: str) -> float | None:
+            value = prices.get(code)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            return float(value)
+
+        usd, eur = pick("USD"), pick("EUR")
+        if usd is None and eur is None:
+            return None
+        return {"usd": usd, "eur": eur}
+
     def nodes_to_enrich(self, limit: int, max_age: float = 86400) -> list[str]:
         now = time.time()
         with self._lock:
@@ -2189,51 +2400,115 @@ class Store:
             "node2": side(channel.node2, channel.policy2),
         }
 
-    def channels_for(self, pubkey: str, page: int, page_size: int) -> dict:
-        scids = self.by_node.get(pubkey, [])
+    def channels_for(
+        self,
+        pubkey: str,
+        page: int,
+        page_size: int,
+        sort: str = "capacity",
+        direction: str = "desc",
+        q: str = "",
+        state: str = "all",
+    ) -> dict:
+        """One page of a node's channels, sorted and filtered.
 
-        def sort_key(scid: int):
-            channel = self.channels[scid]
-            return (-(channel.capacity or 0), scid)
-
-        ordered = sorted(scids, key=sort_key)
-        start = max(0, (page - 1) * page_size)
-        rows = []
-        for scid in ordered[start : start + page_size]:
+        ``sort`` is one of CHANNEL_SORT_FIELDS (age = funding-block distance
+        to the newest block in the graph, in days); ``q`` matches the short
+        channel id, the numeric scid, the peer pubkey substring, or all words
+        of the peer alias; ``state`` keeps active, disabled, or all channels
+        (disabled means both announced policies are disabled). Missing
+        values sort last in either direction.
+        """
+        if sort not in CHANNEL_SORT_FIELDS:
+            sort = "capacity"
+        if state not in CHANNEL_STATES:
+            state = "all"
+        reverse = direction != "asc"
+        needle = (q or "").strip().casefold()
+        words = needle.split()
+        # The newest funding block in the graph approximates the chain tip.
+        tip = max((scid >> 40 for scid in self.channels), default=0)
+        rows: list[dict] = []
+        for scid in self.by_node.get(pubkey, []):
             channel = self.channels[scid]
             peer = channel.other(pubkey)
             peer_node = self.nodes.get(peer)
+            peer_alias = peer_node.alias if peer_node else ""
             outgoing = channel.policy_for(pubkey)
             incoming = channel.peer_policy(pubkey)
-            rows.append(
-                {
-                    "scid": str(scid),
-                    "short_id": channel.short_id(),
-                    "capacity": channel.capacity,
-                    "peer_pubkey": peer,
-                    "peer_alias": peer_node.alias if peer_node else "",
-                    "outgoing": None
-                    if outgoing is None
-                    else {
-                        "base_fee_msat": outgoing.base_msat,
-                        "fee_rate_ppm": outgoing.ppm,
-                        "disabled": outgoing.disabled,
-                        "cltv_delta": outgoing.cltv,
-                    },
-                    "incoming": None
-                    if incoming is None
-                    else {
-                        "base_fee_msat": incoming.base_msat,
-                        "fee_rate_ppm": incoming.ppm,
-                        "disabled": incoming.disabled,
-                        "cltv_delta": incoming.cltv,
-                    },
-                }
+            disabled = bool(
+                outgoing and outgoing.disabled and incoming and incoming.disabled
             )
-        total = len(ordered)
+            if state == "active" and disabled:
+                continue
+            if state == "disabled" and not disabled:
+                continue
+            if needle:
+                alias_hit = bool(peer_alias) and all(
+                    word in peer_alias.casefold() for word in words
+                )
+                if not (
+                    alias_hit
+                    or needle in channel.short_id()
+                    or needle in str(scid)
+                    or needle in peer.casefold()
+                ):
+                    continue
+            block = scid >> 40
+            age_days = (tip - block) / BLOCKS_PER_DAY if tip and block else None
+
+            def side(policy: Policy | None) -> dict | None:
+                return None if policy is None else {
+                    "base_fee_msat": policy.base_msat,
+                    "fee_rate_ppm": policy.ppm,
+                    "disabled": policy.disabled,
+                    "cltv_delta": policy.cltv,
+                    "min_htlc_msat": policy.min_htlc_msat,
+                    "max_htlc_msat": policy.max_htlc_msat,
+                }
+
+            row = {
+                "scid": str(scid),
+                "short_id": channel.short_id(),
+                "capacity": channel.capacity,
+                "peer_pubkey": peer,
+                "peer_alias": peer_alias,
+                "funding_block": block,
+                "age_days": age_days,
+                "state": "disabled" if disabled else "active",
+                "outgoing": side(outgoing),
+                "incoming": side(incoming),
+                # Sort values, stripped before the rows are returned.
+                "_sort": {
+                    "capacity": channel.capacity,
+                    "peer_alias": peer_alias.casefold() if peer_alias else None,
+                    "out_ppm": outgoing.ppm if outgoing else None,
+                    "in_ppm": incoming.ppm if incoming else None,
+                    "out_base": outgoing.base_msat if outgoing else None,
+                    "in_base": incoming.base_msat if incoming else None,
+                    "cltv": outgoing.cltv if outgoing else None,
+                    "age": age_days,
+                    "short_id": scid,
+                },
+            }
+            rows.append(row)
+
+        def sort_key(row: dict):
+            value = row["_sort"][sort]
+            missing = value is None or value == ""
+            comparable = value if isinstance(value, str) else float(value or 0)
+            # Present values always sort before missing ones.
+            return (missing, _Directed(comparable, reverse), row["_sort"]["short_id"])
+
+        rows.sort(key=sort_key)
+        total = len(rows)
         pages = max(1, (total + page_size - 1) // page_size) if total else 1
+        page = min(max(1, page), pages)
+        start = (page - 1) * page_size
+        for row in rows:
+            row.pop("_sort", None)
         return {
-            "objects": rows,
+            "objects": rows[start : start + page_size],
             "page": page,
             "pages": pages,
             "page_size": page_size,
@@ -2269,6 +2544,8 @@ class Store:
         reference: str | None = None,
         reachable_only: bool = False,
         feature: str | None = None,
+        condition_filter: dict | None = None,
+        protocol_match: str = "any",
     ) -> dict:
         protocols = protocols or []
         conditions = conditions or []
@@ -2276,6 +2553,8 @@ class Store:
             sort = "total_capacity"
         if feature not in features.FILTER_NAMES:
             feature = None
+        if protocol_match not in {"any", "all"}:
+            protocol_match = "any"
         distances = self.shortest_paths(reference) if reference else {}
         words = [word.casefold() for word in text.split() if word.strip()]
         matched = []
@@ -2287,8 +2566,12 @@ class Store:
                 haystack = f"{node.alias} {pubkey}".casefold()
                 if not all(word in haystack for word in words):
                     continue
-            if protocols and not all(info.get(protocol) for protocol in protocols):
-                continue
+            if protocols:
+                # "all" requires every selected protocol; "any" (the
+                # original explorer's OR) at least one of them.
+                present = [bool(info.get(protocol)) for protocol in protocols]
+                if not (all(present) if protocol_match == "all" else any(present)):
+                    continue
             if feature and not features.has(node.features, feature):
                 continue
             metrics = self.metrics.get(pubkey, {})
@@ -2301,10 +2584,19 @@ class Store:
                 "eigenvector_weighted_rank",
             )}}
             record["alias"] = node.alias
+            record["first_seen"] = node.first_seen
             record["shortest_path"] = distances.get(pubkey) if reference else None
+            # Feature flags follow node_view(): None means "bits never
+            # learned", which matches no condition.
+            for flag in features.FILTER_BITS:
+                record[flag] = (
+                    features.has(node.features, flag) if node.features else None
+                )
             if reference and reachable_only and pubkey not in distances:
                 continue
             if conditions and not self._match(record, conditions, quantifier):
+                continue
+            if condition_filter and not _filter_tree_matches(record, condition_filter):
                 continue
             matched.append((pubkey, record))
 
@@ -2340,27 +2632,14 @@ class Store:
         }
 
     def _match(self, record: dict, conditions: list[tuple[str, str, float]], quantifier: str) -> bool:
+        """Flat condition list; the API layer validates before this runs."""
         results = []
         for field_name, relation, raw in conditions:
-            if field_name not in SORT_FIELDS and field_name != "shortest_path":
+            if field_name not in FILTER_FIELDS:
                 continue
-            current = record.get(field_name)
-            if current is None:
-                results.append(False)
-                continue
-            try:
-                value = float(current)
-            except (TypeError, ValueError):
-                results.append(False)
-                continue
-            if relation == "gt":
-                results.append(value > raw)
-            elif relation == "lt":
-                results.append(value < raw)
-            elif relation == "eq":
-                results.append(value == raw)
-            else:
-                results.append(False)
+            results.append(
+                _condition_matches(record, {"field": field_name, "rel": relation, "value": raw})
+            )
         if not results:
             return True
         if quantifier == "any":

@@ -501,20 +501,12 @@ async function renderGraph(root) {
     </ol>`;
 }
 
-const FILTER_FIELDS = [
-  ["num_channels", "Channels"],
-  ["total_capacity", "Total capacity (sats)"],
-  ["med_out_ppm", "Median outgoing fee (ppm)"],
-  ["avg_out_ppm", "Average outgoing fee (ppm)"],
-  ["med_out_base", "Median base fee (msat)"],
-  ["avg_capacity", "Average channel capacity"],
-  ["betweenness_rank", "Betweenness rank"],
-  ["closeness_rank", "Closeness rank"],
-  ["closeness_weighted_rank", "Closeness rank (weighted)"],
-  ["eigenvector_rank", "Eigenvector rank"],
-  ["eigenvector_weighted_rank", "Eigenvector rank (weighted)"],
+const PROTOCOL_OPTIONS = ["ipv4", "ipv6", "tor"];
+const QUANTIFIERS = [
+  ["all", "all conditions"],
+  ["any", "any condition"],
+  ["none", "none of the conditions"],
 ];
-
 const FEATURE_FILTERS = [
   ["", "any"],
   ["wumbo", "wumbo"],
@@ -523,6 +515,166 @@ const FEATURE_FILTERS = [
   ["onion_messages", "onion messages"],
   ["route_blinding", "route blinding"],
 ];
+const RELATIONS = [
+  ["gt", "is greater than"],
+  ["lt", "is less than"],
+  ["eq", "equals"],
+  ["gte", "is at least"],
+  ["lte", "is at most"],
+  ["neq", "is not"],
+];
+const RELATION_SYMBOLS = { gt: ">", lt: "<", eq: "=", gte: "≥", lte: "≤", neq: "≠" };
+const PAGE_SIZES = [10, 30, 50, 100];
+// Used only if /api/filter-fields is unreachable; labels normally come from
+// the API so they live in one place.
+const FILTER_FIELDS_FALLBACK = [
+  { field: "num_channels", label: "Channels", unit: null, kind: "number" },
+  { field: "total_capacity", label: "Total capacity", unit: "sat", kind: "number" },
+  { field: "med_out_ppm", label: "Median outgoing fee rate", unit: "ppm", kind: "number" },
+  { field: "betweenness_rank", label: "Betweenness rank", unit: null, kind: "number" },
+];
+
+let filterFieldsPromise = null;
+function getFilterFields() {
+  if (!filterFieldsPromise) {
+    filterFieldsPromise = api("/api/filter-fields").catch(() => FILTER_FIELDS_FALLBACK);
+  }
+  return filterFieldsPromise;
+}
+
+function fieldLabel(fields, name) {
+  const found = fields.find((entry) => entry.field === name);
+  if (!found) return name;
+  return found.unit ? `${found.label} [${found.unit}]` : found.label;
+}
+
+function debounce(fn, wait = 350) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), wait);
+  };
+}
+
+// Column model shared by the compact and the grouped (nested headers) view.
+// defaultDir makes rank columns sort ascending first.
+const NODE_LEADING = [
+  { field: "alias", label: "Alias", left: true, defaultDir: "asc" },
+  { field: "pubkey", label: "Public key", left: true, nosort: true },
+  { field: "num_channels", label: "Channels" },
+  { field: "total_capacity", label: "Capacity [sat]" },
+];
+const NODE_GROUPS = [
+  {
+    label: "Channel capacity [sat]",
+    cols: [
+      { field: "avg_capacity", label: "Avg" },
+      { field: "med_capacity", label: "Med" },
+      { field: "max_capacity", label: "Max" },
+    ],
+  },
+  {
+    label: "Outgoing fees",
+    cols: [
+      { field: "avg_out_ppm", label: "Avg ppm" },
+      { field: "med_out_ppm", label: "Med ppm" },
+      { field: "max_out_ppm", label: "Max ppm" },
+      { field: "avg_out_base", label: "Avg base" },
+      { field: "med_out_base", label: "Med base" },
+      { field: "max_out_base", label: "Max base" },
+    ],
+  },
+  {
+    label: "Incoming fees",
+    cols: [
+      { field: "avg_in_ppm", label: "Avg ppm" },
+      { field: "med_in_ppm", label: "Med ppm" },
+      { field: "avg_in_base", label: "Avg base" },
+      { field: "med_in_base", label: "Med base" },
+    ],
+  },
+  {
+    label: "Centrality",
+    cols: [
+      { field: "betweenness_rank", label: "Btw" },
+      { field: "betweenness_weighted_rank", label: "Btw w" },
+      { field: "closeness_rank", label: "Cls" },
+      { field: "closeness_weighted_rank", label: "Cls w" },
+      { field: "eigenvector_rank", label: "Eigen" },
+      { field: "eigenvector_weighted_rank", label: "Eigen w" },
+    ],
+  },
+];
+const NODE_COMPACT_MIDDLE = [
+  { field: "active_channels", label: "Active" },
+  { field: "med_out_ppm", label: "Median fee [ppm]" },
+  { field: "med_out_base", label: "Median base [msat]" },
+  { field: "betweenness_rank", label: "Betweenness" },
+  { field: "closeness_rank", label: "Closeness" },
+  { field: "eigenvector_rank", label: "Eigenvector" },
+];
+
+function defaultDirection(field) {
+  return /_rank$/.test(field) || field === "alias" || field === "peer_alias" || field === "short_id"
+    ? "asc"
+    : "desc";
+}
+
+function nodeCell(field, node) {
+  switch (field) {
+    case "alias":
+      return `<a href="/node/${node.pubkey}">${esc(node.alias || "[no alias]")}</a>`;
+    case "pubkey":
+      return pubkeyChip(node.pubkey);
+    case "total_capacity":
+    case "avg_capacity":
+    case "med_capacity":
+    case "max_capacity":
+      return sats(node[field]);
+    case "first_seen":
+      return node.first_seen ? new Date(node.first_seen * 1000).toISOString().slice(0, 10) : "—";
+    case "shortest_path":
+      return node.shortest_path == null ? "∞" : num(node.shortest_path);
+    case "clearnet":
+      return `${node.ipv4 ? "v4 " : ""}${node.ipv6 ? "v6 " : ""}${node.tor ? "tor" : ""}`;
+    case "features":
+      return featureMiniBadges(node);
+    default:
+      return num(node[field], field.endsWith("_ppm") ? 1 : 0);
+  }
+}
+
+function sortHeader(col, sort, dir, rowSpan = 0) {
+  const span = rowSpan ? ` rowspan="${rowSpan}"` : "";
+  const cls = col.left ? "left" : "";
+  if (!col.field || col.nosort) {
+    return `<th class="${cls}"${span}>${col.label}</th>`;
+  }
+  const active = sort === col.field;
+  const mark = active ? (dir === "asc" ? "▲" : "▼") : "⇅";
+  return `<th class="${cls}"${span} aria-sort="${active ? (dir === "asc" ? "ascending" : "descending") : "none"}"><button type="button" class="th-sort${active ? " active" : ""}" data-sort="${col.field}">${col.label} <span class="chev${active ? "" : " dim"}">${mark}</span></button></th>`;
+}
+
+function wireSortHeaders(host, params, urlFor) {
+  host.querySelectorAll("[data-sort]").forEach((button) => {
+    button.onclick = () => {
+      const field = button.dataset.sort;
+      const next = new URLSearchParams(params);
+      const currentSort = next.get("sort") || "total_capacity";
+      const currentDir = next.get("dir") || "desc";
+      const dir =
+        currentSort === field
+          ? currentDir === "asc"
+            ? "desc"
+            : "asc"
+          : defaultDirection(field);
+      next.set("sort", field);
+      next.set("dir", dir);
+      next.delete("page");
+      go(urlFor(next));
+    };
+  });
+}
 
 function featureMiniBadges(node) {
   if (!node.features || !node.features.length) return "";
@@ -539,103 +691,267 @@ function featureMiniBadges(node) {
     .join("");
 }
 
+function parseConditionRow(raw) {
+  const parts = raw.split("|");
+  if (parts.length !== 3) return null;
+  return { field: parts[0], rel: parts[1], value: parts[2] };
+}
+
+// Filter state lives in the URL: filter= holds the JSON group the API
+// evaluates, so links (including nested hand-written ones) are shareable.
+function readNodesState(params) {
+  const state = {
+    q: params.get("q") || "",
+    feature: params.get("feature") || "",
+    protocols: (params.get("protocol") || "")
+      .split(",")
+      .filter((item) => PROTOCOL_OPTIONS.includes(item)),
+    protocolMatch: params.get("protocol_match") === "all" ? "all" : "any",
+    quantifier: ["all", "any", "none"].includes(params.get("quantifier"))
+      ? params.get("quantifier")
+      : "all",
+    rows: [],
+    nested: false,
+    reference: params.get("reference") || "",
+    reachable: params.get("reachable") === "1",
+    sort: params.get("sort") || "total_capacity",
+    dir: params.get("dir") || "desc",
+    pageSize: PAGE_SIZES.includes(Number(params.get("page_size")))
+      ? Number(params.get("page_size"))
+      : 30,
+    groups: params.get("groups") === "1",
+  };
+  const raw = params.get("filter");
+  if (raw) {
+    try {
+      const tree = JSON.parse(raw);
+      if (tree && typeof tree === "object" && Array.isArray(tree.items) && tree.items.length) {
+        state.quantifier = tree.op === "or" ? "any" : tree.op === "not" ? "none" : "all";
+        // Keep each row's position in tree.items so chips can remove the
+        // right entry even when the URL carries nested groups.
+        state.rows = tree.items
+          .map((item, pos) => ({ item, pos }))
+          .filter(({ item }) => item && typeof item === "object" && item.field !== undefined)
+          .map(({ item, pos }) => ({
+            field: String(item.field),
+            rel: String(item.rel || "gt"),
+            value: String(item.value ?? ""),
+            pos,
+          }));
+        state.nested = tree.items.some(
+          (item) => item && typeof item === "object" && Array.isArray(item.items)
+        );
+      }
+    } catch (error) {
+      state.rows = [];
+    }
+  } else {
+    // Links from the old single-condition UI.
+    const legacy = params.getAll("condition").map(parseConditionRow).filter(Boolean);
+    if (!legacy.length && params.get("field")) {
+      legacy.push({
+        field: params.get("field"),
+        rel: params.get("rel") || "gt",
+        value: params.get("value") || "",
+      });
+    }
+    state.rows = legacy;
+  }
+  return state;
+}
+
+function conditionRowHtml(row, fields, index) {
+  const options = fields
+    .map(
+      (entry) =>
+        `<option value="${esc(entry.field)}"${entry.field === row.field ? " selected" : ""}>${esc(
+          entry.label
+        )}${entry.unit ? ` [${esc(entry.unit)}]` : ""}${entry.kind === "bool" ? " (1/0)" : ""}</option>`
+    )
+    .join("");
+  return `<div class="cond-row" data-index="${index}">
+    <select class="cond-field" aria-label="Condition field">${options}</select>
+    <select class="cond-rel" aria-label="Condition relation">${RELATIONS.map(
+      ([value, label]) => `<option value="${value}"${value === row.rel ? " selected" : ""}>${label}</option>`
+    ).join("")}</select>
+    <input class="cond-value" type="number" step="any" value="${esc(row.value)}" placeholder="value" aria-label="Condition value" />
+    <button type="button" class="cond-remove" title="Remove condition">✕</button>
+  </div>`;
+}
+
+function renderFilterChips(container, state, fields) {
+  const chips = [];
+  if (state.q) chips.push({ key: "q", label: `text: ${state.q}` });
+  if (state.feature) chips.push({ key: "feature", label: `feature: ${state.feature}` });
+  if (state.protocols.length)
+    chips.push({ key: "protocol", label: `${state.protocols.join(" + ")} (${state.protocolMatch})` });
+  state.rows.forEach((row, index) => {
+    if (row.field)
+      chips.push({
+        key: `leaf:${index}`,
+        label: `${fieldLabel(fields, row.field)} ${RELATION_SYMBOLS[row.rel] || row.rel} ${row.value}`,
+      });
+  });
+  if (state.nested) chips.push({ key: "nested", label: "nested filter from URL", locked: true });
+  container.innerHTML = chips.length
+    ? chips
+        .map(
+          (chip) =>
+            `<button type="button" class="chip" data-chip="${esc(chip.key)}"${chip.locked ? " disabled title=\"Only removable with Reset\"" : ""}>${esc(chip.label)}${chip.locked ? "" : '<span class="x">✕</span>'}</button>`
+        )
+        .join("")
+    : `<span class="hint">No filters active.</span>`;
+  container.querySelectorAll("[data-chip]:not([disabled])").forEach((chip) => {
+    chip.onclick = () => {
+      const next = new URLSearchParams(location.search);
+      const [kind, index] = chip.dataset.chip.split(":");
+      if (kind === "leaf") {
+        const raw = next.get("filter");
+        if (raw) {
+          try {
+            const tree = JSON.parse(raw);
+            const row = state.rows[Number(index)];
+            tree.items.splice(row && row.pos !== undefined ? row.pos : Number(index), 1);
+            if (tree.items.length) next.set("filter", JSON.stringify(tree));
+            else next.delete("filter");
+          } catch (error) {
+            next.delete("filter");
+          }
+        } else {
+          const conditions = next.getAll("condition");
+          conditions.splice(Number(index), 1);
+          next.delete("condition");
+          conditions.forEach((condition) => next.append("condition", condition));
+          next.delete("field");
+          next.delete("rel");
+          next.delete("value");
+        }
+      } else if (kind === "protocol") {
+        next.delete("protocol");
+        next.delete("protocol_match");
+      } else {
+        next.delete(kind);
+      }
+      next.delete("page");
+      go(`/nodes?${next.toString()}`);
+    };
+  });
+}
+
 async function renderNodes(root) {
   const params = new URLSearchParams(location.search);
+  const state = readNodesState(params);
+  const fields = await getFilterFields();
   root.innerHTML = `
     <section class="card filters">
       <h2>Node explorer</h2>
       <div class="filter-row">
         <label class="field">Alias or pubkey
-          <input id="q" type="search" value="${esc(params.get("q") || "")}" />
-        </label>
-        <label class="field">Protocols
-          <select id="protocol">
-            <option value="">any</option>
-            <option value="ipv4">ipv4</option>
-            <option value="tor">tor</option>
-            <option value="ipv6">ipv6</option>
-          </select>
+          <input id="q" type="search" value="${esc(state.q)}" />
         </label>
         <label class="field">Features
-          <select id="feature">${FEATURE_FILTERS.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select>
+          <select id="feature">${FEATURE_FILTERS.map(([value, label]) => `<option value="${value}"${value === state.feature ? " selected" : ""}>${label}</option>`).join("")}</select>
         </label>
-        <label class="field">Match
-          <select id="quantifier">
-            <option value="all">all conditions</option>
-            <option value="any">any condition</option>
-            <option value="none">none of the conditions</option>
-          </select>
-        </label>
-      </div>
-      <div class="filter-row">
-        <label class="field">Field
-          <select id="field">${FILTER_FIELDS.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select>
-        </label>
-        <label class="field">Relation
-          <select id="rel">
-            <option value="gt">is greater than</option>
-            <option value="lt">is less than</option>
-            <option value="eq">equals</option>
-          </select>
-        </label>
-        <label class="field">Value
-          <input id="value" type="number" value="${esc(params.get("value") || "")}" />
-        </label>
-        <label class="field">Sort
-          <select id="sort">
-            <option value="total_capacity">capacity</option>
-            <option value="num_channels">channels</option>
-            <option value="med_out_ppm">fee rate</option>
-            <option value="betweenness_rank">betweenness</option>
-            <option value="closeness_rank">closeness</option>
-            <option value="closeness_weighted_rank">closeness (weighted)</option>
-            <option value="eigenvector_rank">eigenvector</option>
-            <option value="alias">alias</option>
-          </select>
-        </label>
-        <button class="btn" id="apply" type="button">Apply</button>
-      </div>
-      <p class="hint">Betweenness and closeness are sampled. Rank 1 is the most central node. Reference node limits the table to its reachable neighborhood.</p>
-      <div class="filter-row">
         <label class="field">Reference node pubkey
-          <input id="reference" type="text" value="${esc(params.get("reference") || "")}" placeholder="02… type an alias" style="min-width:22rem" />
+          <input id="reference" type="text" value="${esc(state.reference)}" placeholder="02… type an alias" style="min-width:20rem" />
         </label>
-        <label class="field"><span>Reachable only</span>
-          <input id="reachable" type="checkbox" ${params.get("reachable") === "1" ? "checked" : ""} />
+        <label class="field checkbox"><span>Reachable only</span>
+          <input id="reachable" type="checkbox" ${state.reachable ? "checked" : ""} />
         </label>
       </div>
+      <div class="filter-row">
+        <span class="field-label">Protocols</span>
+        ${PROTOCOL_OPTIONS.map(
+          (protocol) => `<label class="check"><input type="checkbox" class="proto" value="${protocol}" ${state.protocols.includes(protocol) ? "checked" : ""} /> ${protocol}</label>`
+        ).join("")}
+        <label class="field">Protocol match
+          <select id="protocol-match">
+            <option value="any"${state.protocolMatch === "any" ? " selected" : ""}>any of them</option>
+            <option value="all"${state.protocolMatch === "all" ? " selected" : ""}>all of them</option>
+          </select>
+        </label>
+      </div>
+      <div class="filter-row">
+        <label class="field">Match
+          <select id="quantifier">${QUANTIFIERS.map(
+            ([value, label]) => `<option value="${value}"${value === state.quantifier ? " selected" : ""}>${label}</option>`
+          ).join("")}</select>
+        </label>
+      </div>
+      <div class="cond-list" id="cond-list"></div>
+      <div class="filter-row">
+        <button type="button" class="btn ghost" id="add-cond">+ Add condition</button>
+        <button type="button" class="btn ghost" id="reset">Reset</button>
+        <button type="button" class="btn" id="apply">Apply filters</button>
+      </div>
+      <div class="chips" id="filter-chips"></div>
+      <p class="hint">Betweenness and closeness are sampled. Rank 1 is the most central node; rank columns sort ascending first. Values this explorer does not know (features not learned, no reference node) never match a condition. The filter lives in the URL, so links are shareable.</p>
     </section>
     <div id="node-table" class="card"><p class="hint">Loading nodes…</p></div>`;
-  ["protocol", "quantifier", "field", "rel", "sort", "feature"].forEach((id) => {
-    const value = params.get(id);
-    if (value) document.getElementById(id).value = value;
-  });
   attachAutocomplete(document.getElementById("reference"));
+
+  // Condition rows: at least one empty row, like the original explorer.
+  let rows = state.rows.length ? state.rows.map((row) => ({ ...row })) : [];
+  if (!rows.length) rows = [{ field: fields[0].field, rel: "gt", value: "" }];
+  const list = document.getElementById("cond-list");
+  const renderRows = () => {
+    list.innerHTML = rows.map((row, index) => conditionRowHtml(row, fields, index)).join("");
+    list.querySelectorAll(".cond-row").forEach((element) => {
+      const index = Number(element.dataset.index);
+      element.querySelector(".cond-field").onchange = (event) => {
+        rows[index].field = event.target.value;
+      };
+      element.querySelector(".cond-rel").onchange = (event) => {
+        rows[index].rel = event.target.value;
+      };
+      element.querySelector(".cond-value").oninput = (event) => {
+        rows[index].value = event.target.value;
+      };
+      element.querySelector(".cond-remove").onclick = () => {
+        rows.splice(index, 1);
+        if (!rows.length) rows = [{ field: fields[0].field, rel: "gt", value: "" }];
+        renderRows();
+      };
+    });
+  };
+  renderRows();
+  document.getElementById("add-cond").onclick = () => {
+    rows.push({ field: fields[0].field, rel: "gt", value: "" });
+    renderRows();
+  };
+  document.getElementById("reset").onclick = () => go("/nodes");
   document.getElementById("apply").onclick = () => {
     const next = new URLSearchParams();
     const q = document.getElementById("q").value.trim();
     if (q) next.set("q", q);
-    const protocol = document.getElementById("protocol").value;
-    if (protocol) next.set("protocol", protocol);
     const feature = document.getElementById("feature").value;
     if (feature) next.set("feature", feature);
-    next.set("quantifier", document.getElementById("quantifier").value);
-    const field = document.getElementById("field").value;
-    const value = document.getElementById("value").value;
-    if (value !== "") {
-      next.set("field", field);
-      next.set("rel", document.getElementById("rel").value);
-      next.set("value", value);
-      next.append("condition", `${field}|${document.getElementById("rel").value}|${value}`);
+    const protocols = [...document.querySelectorAll(".proto:checked")].map((box) => box.value);
+    if (protocols.length) {
+      next.set("protocol", protocols.join(","));
+      if (document.getElementById("protocol-match").value === "all") next.set("protocol_match", "all");
     }
-    const sort = document.getElementById("sort").value;
-    next.set("sort", sort);
-    next.set("dir", sort.endsWith("_rank") || sort === "alias" ? "asc" : "desc");
+    const quantifier = document.getElementById("quantifier").value;
+    const leaves = rows
+      .map((row) => ({ ...row, value: String(row.value).trim() }))
+      .filter((row) => row.field && row.rel && row.value !== "" && Number.isFinite(Number(row.value)));
+    if (leaves.length) {
+      const op = quantifier === "any" ? "or" : quantifier === "none" ? "not" : "and";
+      next.set(
+        "filter",
+        JSON.stringify({ op, items: leaves.map((row) => ({ field: row.field, rel: row.rel, value: Number(row.value) })) })
+      );
+    }
     const reference = document.getElementById("reference").value.trim();
     if (reference) next.set("reference", reference);
     if (document.getElementById("reachable").checked) next.set("reachable", "1");
+    next.set("sort", state.sort);
+    next.set("dir", state.dir);
+    next.set("page_size", String(state.pageSize));
+    if (state.groups) next.set("groups", "1");
     go(`/nodes?${next.toString()}`);
   };
+  renderFilterChips(document.getElementById("filter-chips"), state, fields);
   await loadNodeTable(params);
 }
 
@@ -644,43 +960,71 @@ async function loadNodeTable(params) {
   if (!query.get("sort")) query.set("sort", "total_capacity");
   if (!query.get("dir")) query.set("dir", "desc");
   if (!query.get("page")) query.set("page", "1");
+  if (!query.get("page_size")) query.set("page_size", "30");
+  const sort = query.get("sort");
+  const dir = query.get("dir");
+  const detailed = params.get("groups") === "1";
+  const reference = params.get("reference") || "";
+  const pageSize = Number(query.get("page_size"));
   const data = await api(`/api/nodes?${query.toString()}`);
   const host = document.getElementById("node-table");
-  if (!data.objects.length) {
-    host.innerHTML = `<p class="empty">No nodes match this filter.</p>`;
-    return;
-  }
+  if (!host) return;
+
+  const leading = [...NODE_LEADING];
+  if (detailed) leading.push({ field: "first_seen", label: "First seen" });
+  const middle = detailed ? NODE_GROUPS.flatMap((group) => group.cols) : NODE_COMPACT_MIDDLE;
+  const trailing = [
+    ...(reference ? [{ field: "shortest_path", label: "Hops" }] : []),
+    { field: "clearnet", label: "Clearnet", left: true, nosort: true },
+    { field: "features", label: "Features", left: true, nosort: true },
+  ];
+  const columns = [...leading, ...middle, ...trailing];
+
+  const head = detailed
+    ? `<tr>
+        ${leading.map((col) => sortHeader(col, sort, dir, 2)).join("")}
+        ${NODE_GROUPS.map((group) => `<th colspan="${group.cols.length}" class="group">${group.label}</th>`).join("")}
+        ${trailing.map((col) => sortHeader(col, sort, dir, 2)).join("")}
+      </tr>
+      <tr>${NODE_GROUPS.flatMap((group) => group.cols.map((col) => sortHeader(col, sort, dir))).join("")}</tr>`
+    : `<tr>${columns.map((col) => sortHeader(col, sort, dir)).join("")}</tr>`;
+
   host.innerHTML = `
-    <table>
-      <thead><tr>
-        <th class="left">Alias</th><th class="left">Public key</th><th>Channels</th><th>Capacity</th>
-        <th>Median fee ppm</th><th>Median base msat</th><th>Betweenness</th><th>Closeness</th><th>Eigenvector</th><th class="left">Clearnet</th><th class="left">Features</th>
-      </tr></thead>
+    <div class="table-tools">
+      <div class="seg" role="group" aria-label="Column detail">
+        <button type="button" data-cols="compact" class="${detailed ? "" : "active"}">Compact</button>
+        <button type="button" data-cols="detailed" class="${detailed ? "active" : ""}">Column groups</button>
+      </div>
+      <label class="field">Rows per page
+        <select id="nodes-page-size">${PAGE_SIZES.map(
+          (size) => `<option value="${size}"${size === pageSize ? " selected" : ""}>${size}</option>`
+        ).join("")}</select>
+      </label>
+      <span class="hint">${data.total_count.toLocaleString()} nodes</span>
+    </div>
+    ${
+      data.objects.length
+        ? `<table>
+      <thead>${head}</thead>
       <tbody>
         ${data.objects
           .map(
-            (node) => `<tr>
-            <td class="left"><a href="/node/${node.pubkey}">${esc(node.alias || "[no alias]")}</a></td>
-            <td class="left">${pubkeyChip(node.pubkey)}</td>
-            <td>${num(node.num_channels)}</td>
-            <td>${sats(node.total_capacity)}</td>
-            <td>${num(node.med_out_ppm, 1)}</td>
-            <td>${num(node.med_out_base, 0)}</td>
-            <td>${num(node.betweenness_rank)}</td>
-            <td>${num(node.closeness_rank)}</td>
-            <td>${num(node.eigenvector_rank)}</td>
-            <td class="left">${node.ipv4 ? "v4 " : ""}${node.ipv6 ? "v6 " : ""}${node.tor ? "tor" : ""}</td>
-            <td class="left">${featureMiniBadges(node)}</td>
-          </tr>`
+            (node) =>
+              `<tr>${columns
+                .map((col) => `<td class="${col.left ? "left" : ""}">${nodeCell(col.field, node)}</td>`)
+                .join("")}</tr>`
           )
           .join("")}
       </tbody>
-    </table>
+    </table>`
+        : `<p class="empty">No nodes match this filter.</p>`
+    }
     <div class="pager">
       <button class="btn ghost" type="button" id="prev" ${data.page <= 1 ? "disabled" : ""}>Previous</button>
-      <span>Page ${data.page} of ${data.pages} · ${data.total_count.toLocaleString()} nodes</span>
+      <span>Page ${data.page} of ${data.pages}</span>
       <button class="btn ghost" type="button" id="next" ${data.page >= data.pages ? "disabled" : ""}>Next</button>
     </div>`;
+
   const turn = (page) => {
     const next = new URLSearchParams(params);
     next.set("page", String(page));
@@ -688,6 +1032,21 @@ async function loadNodeTable(params) {
   };
   document.getElementById("prev").onclick = () => turn(data.page - 1);
   document.getElementById("next").onclick = () => turn(data.page + 1);
+  host.querySelectorAll("[data-cols]").forEach((button) => {
+    button.onclick = () => {
+      const next = new URLSearchParams(params);
+      if (button.dataset.cols === "detailed") next.set("groups", "1");
+      else next.delete("groups");
+      go(`/nodes?${next.toString()}`);
+    };
+  });
+  document.getElementById("nodes-page-size").onchange = (event) => {
+    const next = new URLSearchParams(params);
+    next.set("page_size", event.target.value);
+    next.delete("page");
+    go(`/nodes?${next.toString()}`);
+  };
+  wireSortHeaders(host, params, (next) => `/nodes?${next.toString()}`);
 }
 
 function protocols(node) {
@@ -723,11 +1082,104 @@ function statRows(rows) {
     .join("")}</tbody></table>`;
 }
 
+// Sortable column model for the per-node channel table. "fiat" is inserted
+// after capacity when a price is known; age is approximate days.
+const CHANNEL_COLUMNS = [
+  { field: "peer_alias", label: "Peer", left: true, defaultDir: "asc" },
+  { field: "short_id", label: "Short channel id", left: true, defaultDir: "asc" },
+  { field: "capacity", label: "Capacity [sat]" },
+  { field: "out_ppm", label: "Out fee [ppm]" },
+  { field: "out_base", label: "Out base [msat]" },
+  { field: "in_ppm", label: "In fee [ppm]" },
+  { field: "in_base", label: "In base [msat]" },
+  { field: "cltv", label: "CLTV Δ (out)" },
+  { field: "htlc", label: "Min/max HTLC (out) [sat]", nosort: true },
+  { field: "age", label: "Age (approx) [days]" },
+  { field: "state", label: "State", nosort: true },
+];
+
+function channelCell(field, channel, fiat, price, fiatFormat) {
+  const out = channel.outgoing;
+  const incoming = channel.incoming;
+  switch (field) {
+    case "peer_alias":
+      return `<a href="/node/${channel.peer_pubkey}">${esc(channel.peer_alias || shortKey(channel.peer_pubkey))}</a>`;
+    case "short_id":
+      return `<a class="mono" href="/channel/${channel.scid}">${esc(channel.short_id)}</a>`;
+    case "capacity":
+      return sats(channel.capacity);
+    case "out_ppm":
+      return out ? num(out.fee_rate_ppm) : "—";
+    case "out_base":
+      return out ? num(out.base_fee_msat) : "—";
+    case "in_ppm":
+      return incoming ? num(incoming.fee_rate_ppm) : "—";
+    case "in_base":
+      return incoming ? num(incoming.base_fee_msat) : "—";
+    case "cltv":
+      return out ? num(out.cltv_delta) : "—";
+    case "htlc":
+      if (!out) return "—";
+      return `${sats(out.min_htlc_msat / 1000)} – ${sats(out.max_htlc_msat / 1000)}`;
+    case "age":
+      return channel.age_days == null
+        ? "—"
+        : `<span title="funding block ${channel.funding_block}, tip estimated from the newest block in the graph">${num(channel.age_days, 0)} d</span>`;
+    case "state":
+      return channel.state === "disabled"
+        ? '<span class="tag off">disabled</span>'
+        : '<span class="tag">open</span>';
+    case "fiat":
+      if (channel.capacity == null || !fiatFormat || price[fiat] == null) return "—";
+      return fiatFormat.format((channel.capacity / 1e8) * price[fiat]);
+    default:
+      return "—";
+  }
+}
+
 async function renderNode(root, pubkey) {
   root.innerHTML = `<p class="hint">Loading node…</p>`;
   const node = await api(`/api/nodes/${pubkey}`);
-  const page = new URLSearchParams(location.search).get("page") || "1";
-  const channels = await api(`/api/nodes/${pubkey}/channels?page=${page}&page_size=25`);
+  const params = new URLSearchParams(location.search);
+  const pageSize = PAGE_SIZES.includes(Number(params.get("page_size")))
+    ? Number(params.get("page_size"))
+    : 30;
+  const sort = params.get("sort") || "capacity";
+  const dir = params.get("dir") || "desc";
+  const state = ["all", "active", "disabled"].includes(params.get("state"))
+    ? params.get("state")
+    : "all";
+  const query = new URLSearchParams();
+  query.set("page", params.get("page") || "1");
+  query.set("page_size", String(pageSize));
+  query.set("sort", sort);
+  query.set("dir", dir);
+  if (params.get("q")) query.set("q", params.get("q"));
+  query.set("state", state);
+  const channels = await api(`/api/nodes/${pubkey}/channels?${query.toString()}`);
+
+  // Fiat column: capacity / 1e8 * price, formatted per locale; hidden when
+  // the explorer has no price at all.
+  const price = channels.price;
+  const currencies = price ? ["usd", "eur"].filter((code) => price[code] != null) : [];
+  let fiat = params.get("fiat");
+  if (!currencies.includes(fiat)) fiat = currencies[0] || null;
+  const fiatFormat = fiat
+    ? new Intl.NumberFormat(undefined, {
+        style: "currency",
+        currency: fiat.toUpperCase(),
+        maximumFractionDigits: 0,
+      })
+    : null;
+  const columns = [...CHANNEL_COLUMNS];
+  if (fiat) columns.splice(3, 0, { field: "fiat", label: fiat.toUpperCase(), nosort: true });
+  const fiatHeader =
+    fiat && currencies.length > 1
+      ? `<th><select id="ch-fiat" aria-label="Fiat currency">${currencies
+          .map((code) => `<option value="${code}"${code === fiat ? " selected" : ""}>${code.toUpperCase()}</option>`)
+          .join("")}</select></th>`
+      : null;
+
   const addresses = node.addresses.length
     ? `<ul class="side-list">${node.addresses
         .map((address) => `<li class="mono" style="justify-content:flex-start;overflow-wrap:anywhere">${esc(address)}</li>`)
@@ -826,32 +1278,53 @@ async function renderNode(root, pubkey) {
       <button class="btn" type="submit">Find path</button>
       <span id="path-result" class="hint"></span>
     </form>
-    <div class="card">
-      <h2>Channels</h2>
-      <table>
-        <thead><tr><th class="left">Peer</th><th class="left">Short channel id</th><th>Capacity</th><th>Out ppm</th><th>In ppm</th><th>State</th></tr></thead>
+    <div class="card" id="channels-card">
+      <div class="table-tools">
+        <h2 style="margin:0">Channels</h2>
+        <input id="ch-q" type="search" placeholder="Filter by peer alias, pubkey, or channel id" value="${esc(params.get("q") || "")}" style="min-width:16rem" />
+        <label class="field">State
+          <select id="ch-state">${["all", "active", "disabled"]
+            .map((option) => `<option value="${option}"${option === state ? " selected" : ""}>${option}</option>`)
+            .join("")}</select>
+        </label>
+        <label class="field">Rows per page
+          <select id="ch-size">${PAGE_SIZES.map(
+            (size) => `<option value="${size}"${size === pageSize ? " selected" : ""}>${size}</option>`
+          ).join("")}</select>
+        </label>
+        <span class="hint">${channels.total_count.toLocaleString()} channels${params.get("q") ? " matching" : ""}</span>
+      </div>
+      ${
+        channels.objects.length
+          ? `<table>
+        <thead><tr>
+          ${columns
+            .map((col) =>
+              col.field === "fiat"
+                ? fiatHeader
+                : sortHeader(col, sort, dir)
+            )
+            .join("")}
+        </tr></thead>
         <tbody>
           ${channels.objects
-            .map((channel) => {
-              const outDisabled = channel.outgoing && channel.outgoing.disabled;
-              const inDisabled = channel.incoming && channel.incoming.disabled;
-              return `<tr>
-                <td class="left"><a href="/node/${channel.peer_pubkey}">${esc(channel.peer_alias || shortKey(channel.peer_pubkey))}</a></td>
-                <td class="left"><a class="mono" href="/channel/${channel.scid}">${esc(channel.short_id)}</a></td>
-                <td>${sats(channel.capacity)}</td>
-                <td>${channel.outgoing ? num(channel.outgoing.fee_rate_ppm) : "—"}</td>
-                <td>${channel.incoming ? num(channel.incoming.fee_rate_ppm) : "—"}</td>
-                <td>${outDisabled && inDisabled ? '<span class="tag off">disabled</span>' : '<span class="tag">open</span>'}</td>
-              </tr>`;
-            })
+            .map(
+              (channel) =>
+                `<tr>${columns
+                  .map((col) => `<td class="${col.left ? "left" : ""}">${channelCell(col.field, channel, fiat, price, fiatFormat)}</td>`)
+                  .join("")}</tr>`
+            )
             .join("")}
         </tbody>
-      </table>
+      </table>`
+          : `<p class="empty">No channels match.</p>`
+      }
       <div class="pager">
         <button class="btn ghost" id="prev" type="button" ${channels.page <= 1 ? "disabled" : ""}>Previous</button>
         <span>Page ${channels.page} of ${channels.pages}</span>
         <button class="btn ghost" id="next" type="button" ${channels.page >= channels.pages ? "disabled" : ""}>Next</button>
       </div>
+      <p class="hint">Age is approximate: (estimated chain tip − funding block) / 144 blocks per day. The tip is estimated as the newest funding block in the graph. Missing values sort last.</p>
     </div>
     <div class="card" id="node-history"><h2>History</h2><p class="hint">Loading events…</p></div>`;
   attachAutocomplete(document.getElementById("path-from"));
@@ -871,8 +1344,54 @@ async function renderNode(root, pubkey) {
       result.textContent = error.message;
     }
   };
-  document.getElementById("prev").onclick = () => go(`/node/${pubkey}?page=${channels.page - 1}`);
-  document.getElementById("next").onclick = () => go(`/node/${pubkey}?page=${channels.page + 1}`);
+
+  const update = (mutate) => {
+    const next = new URLSearchParams(location.search);
+    mutate(next);
+    next.delete("page");
+    go(`/node/${pubkey}?${next.toString()}`);
+  };
+  document.getElementById("prev").onclick = () => {
+    const next = new URLSearchParams(location.search);
+    next.set("page", String(channels.page - 1));
+    go(`/node/${pubkey}?${next.toString()}`);
+  };
+  document.getElementById("next").onclick = () => {
+    const next = new URLSearchParams(location.search);
+    next.set("page", String(channels.page + 1));
+    go(`/node/${pubkey}?${next.toString()}`);
+  };
+  document.getElementById("ch-q").addEventListener(
+    "input",
+    debounce((event) => {
+      const value = event.target.value.trim();
+      update((next) => {
+        if (value) next.set("q", value);
+        else next.delete("q");
+      });
+    })
+  );
+  document.getElementById("ch-state").onchange = (event) => {
+    const value = event.target.value;
+    update((next) => {
+      if (value === "all") next.delete("state");
+      else next.set("state", value);
+    });
+  };
+  document.getElementById("ch-size").onchange = (event) => {
+    const value = event.target.value;
+    update((next) => next.set("page_size", value));
+  };
+  const fiatSelect = document.getElementById("ch-fiat");
+  if (fiatSelect)
+    fiatSelect.onchange = (event) => {
+      update((next) => next.set("fiat", event.target.value));
+    };
+  wireSortHeaders(
+    document.getElementById("channels-card"),
+    params,
+    (next) => `/node/${pubkey}?${next.toString()}`
+  );
   fillNodeHistory(pubkey);
 }
 
