@@ -31,3 +31,6 @@ services:
 
 volumes:
   explorer-data:
+    # Fixed name: a different compose project name or checkout directory must
+    # reuse the same sqlite history instead of silently creating a new volume.
+    name: explorer_explorer-data

@@ -64,6 +64,28 @@ docker compose logs -f explorer
 
 The sqlite file lives in the `explorer-data` volume, so a container recreate does not re-download before it can serve.
 
+## Keeping the history across deploys
+
+All history (snapshots, fee history, events, rank history) lives in `/data/explorer.sqlite` inside the Docker volume. The compose file pins the volume name to `explorer_explorer-data`, so a different checkout directory or compose project name still mounts the same data. Nothing in the app drops tables; retention only prunes rows older than each table's window.
+
+Redeploy on the VM with:
+
+```bash
+cd ~/explorer && git fetch origin && git checkout --detach origin/main && bash deploy/vm-deploy.sh
+```
+
+`deploy/vm-deploy.sh` takes an online sqlite backup into `~/backups/explorer-<UTC time>.sqlite` first (newest 5 kept), refuses to start without the volume when backups exist (set `ALLOW_NEW_VOLUME=1` to override), then rebuilds in the background (`/tmp/build.log`).
+
+A volume only disappears with `docker compose down -v`, `docker volume rm`, or a new VM. Restore a backup with:
+
+```bash
+docker compose stop explorer
+docker run --rm -v explorer_explorer-data:/data -v ~/backups:/b alpine cp /b/explorer-YYYYMMDDTHHMMSSZ.sqlite /data/explorer.sqlite
+docker compose start explorer
+```
+
+Copy `~/backups` off the VM before deleting or recreating it.
+
 ## Switching the data source
 
 Default (`GRAPH_SOURCE=rgs`) is the right one for a small VM. The public snapshot is the bootstrap: the UI works as soon as it lands, which is seconds, not a node sync.
