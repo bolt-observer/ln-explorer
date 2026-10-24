@@ -733,6 +733,7 @@ class Store:
             """
         )
         self._conn.executescript(feehistory.SCHEMA)
+        feehistory.load_datasets(self._conn)
         snapshot_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(snapshots)")}
         for column, declaration in SNAPSHOT_AGGREGATE_COLUMNS.items():
             if column not in snapshot_columns:

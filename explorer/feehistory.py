@@ -23,9 +23,15 @@ Metric definitions (shared by every source so the series line up):
 
 from __future__ import annotations
 
+import calendar
+import csv
+import hashlib
+import io
 import json
 import math
 import sqlite3
+import time
+from pathlib import Path
 from typing import Iterable
 
 SCHEMA = """
@@ -179,11 +185,70 @@ def channel_policy_history(conn: sqlite3.Connection, scid: int) -> list[dict]:
 
 
 SOURCE_INFO = {
+    "lnresearch": {
+        "label": "lnresearch gossip archive",
+        "note": "Rebuilt from the lnresearch/topology gossip dumps by Christian Decker "
+        "(MIT, doi:10.5281/zenodo.4088530), 2019-2023. Gaps are collection outages.",
+        "file": "fee_daily_lnresearch.csv",
+    },
+    "gossip-archive": {
+        "label": "Gossip archive",
+        "note": "Rebuilt from a public archive of received channel_update gossip, 2024-2026.",
+        "file": "fee_daily_gossip_archive.csv",
+    },
     LIVE_SOURCE: {
         "label": "This explorer",
         "note": "Enabled policies in the LDK rapid gossip sync snapshot, recorded every refresh.",
     },
 }
+DATASET_DIR = Path(__file__).with_name("datasets")
+FLOAT_COLUMNS = (
+    "p10", "p25", "p50", "p75", "p90", "p99", "mean_le50k", "med_base_msat", "zero_base_share",
+)
+
+
+def load_datasets(conn: sqlite3.Connection, directory: Path = DATASET_DIR) -> int:
+    """(Re)import the bundled daily fee datasets whose content changed.
+
+    Each file replaces only its own source's rows and is keyed by its sha256
+    in ``meta``, so startup is a no-op once imported. Returns rows written.
+    """
+    written = 0
+    for source, info in SOURCE_INFO.items():
+        name = info.get("file")
+        path = directory / name if name else None
+        if path is None or not path.is_file():
+            continue
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        meta_key = f"fee_dataset:{source}"
+        found = conn.execute("SELECT value FROM meta WHERE key = ?", (meta_key,)).fetchone()
+        if found and found[0] == digest:
+            continue
+        rows = []
+        for record in csv.DictReader(io.StringIO(data.decode("utf-8"))):
+            day = calendar.timegm(time.strptime(record["date"], "%Y-%m-%d"))
+            row = {
+                "day": day,
+                "source": source,
+                "ts": day,
+                "half_channels": int(record["half_channels"]),
+                "hist": record.get("hist") or None,
+            }
+            for column in FLOAT_COLUMNS:
+                value = record.get(column)
+                row[column] = float(value) if value not in (None, "") else None
+            rows.append(row)
+        conn.execute("DELETE FROM fee_daily WHERE source = ?", (source,))
+        conn.executemany(
+            f"INSERT OR REPLACE INTO fee_daily ({', '.join(FEE_DAILY_COLUMNS)})"
+            f" VALUES ({', '.join(':' + column for column in FEE_DAILY_COLUMNS)})",
+            rows,
+        )
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (meta_key, digest))
+        written += len(rows)
+    conn.commit()
+    return written
 
 DEFINITIONS = (
     "Fee rate percentiles (ppm) over directed channel policies that are not disabled; "
