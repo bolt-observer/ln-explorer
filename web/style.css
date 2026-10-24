@@ -341,10 +341,28 @@ th.group { text-align: center; border-bottom: 0; }
 .table-tools .hint { margin-left: auto; }
 .table-tools input[type="search"] { flex: 0 1 18rem; }
 
+/* Route explorer */
+.route-card { margin-bottom: 0.8rem; }
+.route-card .kv { margin: 0.3rem 0 0.6rem; }
+.route-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.2rem; }
+.route-head h2 { margin: 0; }
+.route-card > table { margin-top: 0.2rem; }
+.route-graph {
+  position: relative;
+  height: 420px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  background: radial-gradient(circle at 50% 45%, #1a2422 0%, #101010 62%);
+}
+#route-sigma { position: absolute; inset: 0; }
+.legend-line.dim { border-top-color: var(--mint-dim); }
+
 @media (max-width: 960px) {
   .stats-row, .graph-layout, .two { grid-template-columns: 1fr; }
   .topbar { flex-wrap: wrap; }
   #search-form, #search-input { width: 100%; min-width: 0; }
   .canvas-wrap, .graph-layout { min-height: 70vh; }
+  .route-graph { height: 300px; }
   table { display: block; overflow-x: auto; }
 }

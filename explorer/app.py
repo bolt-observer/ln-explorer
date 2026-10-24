@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 PUBKEY_RE = re.compile(r"^[0-9a-fA-F]{66}$")
 DOMAIN_RE = re.compile(r"^[a-z0-9.-]+$")
-PAGE_ROUTES = {"", "nodes", "stats", "search", "node", "channel", "rankings"}
+PAGE_ROUTES = {"", "nodes", "stats", "search", "node", "channel", "rankings", "route"}
 PROTOCOLS = frozenset({"ipv4", "ipv6", "tor"})
 
 
