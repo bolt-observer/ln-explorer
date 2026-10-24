@@ -784,8 +784,8 @@ export async function mount(ctx) {
   stats = statsResult.value;
   if (seq === historySeq) {
     if (historyResult.status === "fulfilled") history = historyResult.value;
-    if (feeResult.status === "fulfilled") feeHistory = feeResult.value;
     else if (!isAbort(historyResult.reason)) historyError = historyResult.reason;
+    if (feeResult.status === "fulfilled") feeHistory = feeResult.value;
     renderLegend();
   }
   renderKpis();
