@@ -14,6 +14,14 @@ from explorer.config import Settings
 from explorer.features import FILTER_NAMES
 from explorer.refresh import enrich_channel, enrich_node, start_refresh
 from explorer.rgs import parse_scid
+from explorer.routing import (
+    DEFAULT_K,
+    DEFAULT_TIME_BUDGET_SECONDS,
+    HARD_AMOUNT_SAT,
+    MAX_AMOUNT_SAT,
+    MAX_K,
+    find_routes,
+)
 from explorer.sources import Mempool
 from explorer.store import (
     CHANNEL_SORT_FIELDS,
@@ -483,6 +491,58 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
                 "target": target,
                 "hops": len(hops) - 1,
                 "path": described,
+            }
+        )
+
+    @app.get("/api/route")
+    def route():
+        """Cheapest routes for an amount: k shortest simple paths with fees."""
+        source = (request.args.get("from") or "").strip().lower()
+        target = (request.args.get("to") or "").strip().lower()
+        if not PUBKEY_RE.match(source) or not PUBKEY_RE.match(target):
+            return jsonify({"error": "from and to must be node pubkeys"}), 400
+        if source == target:
+            return jsonify({"error": "from and to must differ"}), 400
+        if source not in store.nodes or target not in store.nodes:
+            return jsonify({"error": "node not found"}), 404
+        raw_amount = (request.args.get("amount_sat") or "").strip()
+        try:
+            amount_sat = int(raw_amount)
+        except ValueError:
+            return jsonify(
+                {"error": "amount_sat must be an integer number of satoshis"}
+            ), 400
+        if not 1 <= amount_sat <= HARD_AMOUNT_SAT:
+            return jsonify(
+                {"error": f"amount_sat must be between 1 and {HARD_AMOUNT_SAT}"}
+            ), 400
+        # Anything above 1 BTC cannot cross a non-wumbo channel anyway; cap
+        # the search there instead of returning nothing for huge inputs.
+        amount_sat = min(amount_sat, MAX_AMOUNT_SAT)
+        try:
+            k = int((request.args.get("k") or str(DEFAULT_K)).strip())
+        except ValueError:
+            return jsonify({"error": "k must be an integer"}), 400
+        k = max(1, min(k, MAX_K))
+        result = find_routes(
+            store,
+            source,
+            target,
+            amount_sat * 1000,
+            k=k,
+            time_budget=DEFAULT_TIME_BUDGET_SECONDS,
+        )
+        return jsonify(
+            {
+                "from": source,
+                "to": target,
+                "amount_sat": amount_sat,
+                "amount_msat": amount_sat * 1000,
+                "k": k,
+                "paths": result["paths"],
+                "reason": result["reason"],
+                "timed_out": result["timed_out"],
+                "elapsed_ms": result["elapsed_ms"],
             }
         )
 
