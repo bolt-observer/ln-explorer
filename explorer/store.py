@@ -19,6 +19,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from explorer import features
+from explorer import feehistory
 from explorer import fees
 from explorer.metrics import compute_metrics
 from explorer.rgs import ParsedGraph, Policy, format_scid
@@ -731,6 +732,7 @@ class Store:
             CREATE INDEX IF NOT EXISTS rank_history_node ON rank_history (pubkey, metric, day);
             """
         )
+        self._conn.executescript(feehistory.SCHEMA)
         snapshot_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(snapshots)")}
         for column, declaration in SNAPSHOT_AGGREGATE_COLUMNS.items():
             if column not in snapshot_columns:
@@ -1059,6 +1061,8 @@ class Store:
         """
         with self._lock:
             now = int(time.time())
+            if self._conn is not None and graph.timestamp != self.graph_timestamp:
+                self._record_policy_changes(graph, now)
             if (self.channels or self.nodes) and graph.timestamp != self.graph_timestamp:
                 events, disabled_flips, enabled_flips = self._diff_events(graph, now)
                 self._pending_events.extend(events)
@@ -1127,6 +1131,20 @@ class Store:
             self.updated_at = time.time()
             self.last_error = ""
             self._reindex()
+
+    def _record_policy_changes(self, graph: ParsedGraph, now: int) -> None:
+        """Append fee-policy changes against the live graph (lock held).
+
+        The first run (or a cold start without a cached graph) writes a
+        baseline row for every policy; afterwards only changed policies.
+        """
+        assert self._conn is not None
+        baseline = not self.channels or self._conn.execute(
+            "SELECT 1 FROM policy_history LIMIT 1"
+        ).fetchone() is None
+        rows = feehistory.policy_changes(self.channels, graph.channels, now, baseline)
+        feehistory.write_policy_changes(self._conn, rows, now)
+        self._conn.commit()
 
     def _diff_events(self, graph: ParsedGraph, now: int) -> tuple[list[dict], int, int]:
         """Diff the incoming snapshot against the live graph (lock held).
@@ -2093,6 +2111,15 @@ class Store:
             self._conn.execute(
                 f"INSERT OR REPLACE INTO snapshots ({columns}) VALUES ({placeholders})", row
             )
+            dist = feehistory.distribution(
+                policy
+                for channel in self.channels.values()
+                for policy in (channel.policy1, channel.policy2)
+            )
+            if dist is not None:
+                feehistory.write_daily(
+                    self._conn, _utc_day(row["ts"]), feehistory.LIVE_SOURCE, row["ts"], dist
+                )
             self._conn.execute(
                 "DELETE FROM snapshots WHERE ts < ?",
                 (int(time.time() - SNAPSHOT_RETENTION_SECONDS),),
@@ -2180,6 +2207,18 @@ class Store:
     def _usd_for_day(self, ts: int) -> float | None:
         pair = self.daily_prices.get(ts - ts % 86400)
         return pair[0] if pair else None
+
+    def fee_history_payload(self, range_name: str = "all") -> dict:
+        window = HISTORY_RANGES.get(range_name)
+        cutoff = int(time.time() - window) if window else 0
+        assert self._conn is not None
+        with self._lock:
+            return feehistory.history_payload(self._conn, cutoff)
+
+    def channel_policy_history(self, scid: int) -> list[dict]:
+        assert self._conn is not None
+        with self._lock:
+            return feehistory.channel_policy_history(self._conn, scid)
 
     def raw_snapshots(self, limit: int = 200) -> list[dict]:
         """Raw local aggregate rows, newest last."""
