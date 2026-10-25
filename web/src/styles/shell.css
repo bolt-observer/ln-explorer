@@ -125,6 +125,7 @@ body[data-inspector="1"] .maptable { right: calc(var(--gutter) * 3 + var(--inspe
 @media (max-width: 720px) {
   .maptable { top: 76px; left: var(--gutter); right: calc(var(--gutter) + 52px); bottom: calc(var(--gutter) + 64px); }
   body[data-inspector="1"] .maptable { display: none; }
+  .maptable .capcell .bar { display: none; }
 }
 .map3d { overflow: hidden; }
 .map3d-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
