@@ -4243,8 +4243,8 @@ void main() {
   // Sub-pixel channels draw at 1 px with proportionally lower opacity.
   float w = max(aWidth * uPixelRatio, 1.0);
   vHalf = w * 0.5;
-  float half = vHalf + 0.75; // room for the antialiased edge
-  vAcross = position.y * half;
+  float outer = vHalf + 0.75; // room for the antialiased edge
+  vAcross = position.y * outer;
   vec4 p = mix(a, b, position.x);
   p.xy += normal * vAcross * 2.0 / uResolution * p.w;
   gl_Position = p;

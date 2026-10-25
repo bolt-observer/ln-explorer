@@ -167,3 +167,11 @@ body[data-inspector="1"] .zoom { right: calc(var(--gutter) * 2 + var(--inspector
 .center-card { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(440px, calc(100vw - 32px)); border-radius: var(--r-xl); padding: 28px; display: grid; gap: 12px; text-align: center; justify-items: center; animation: rise 0.3s var(--ease); }
 .center-card h1 { font-size: 20px; font-weight: 600; }
 .center-card p { color: var(--text-2); }
+/* Compact columns: the table shares the screen with the card and often the inspector. */
+.maptable .dtable th, .maptable .dtable td { padding: 0 8px; }
+.maptable .nl-table th:first-child, .maptable .nl-table td:first-child { padding-left: 16px; }
+.maptable .nl-table th:last-child, .maptable .nl-table td:last-child { padding-right: 16px; }
+.maptable .dtable .name { max-width: 190px; }
+.maptable .nl-table .capcell { min-width: 0; }
+.maptable .capcell .bar { width: 52px; }
+body[data-inspector="1"] .maptable .capcell .bar { display: none; }

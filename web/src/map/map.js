@@ -23,6 +23,7 @@ const EDGE_HOVER = premul(232, 238, 235, 0.85);
 export const DENSITY_STEPS = [100, 200, 400, 600, 800];
 
 const MODE_KEY = "bolt.map.mode"; // must precede `s`: readMode() runs in its initialiser
+const MODES = ["3d", "2d", "table"]; // likewise
 
 const s = {
   container: null,
@@ -55,8 +56,6 @@ const s = {
   stateShown: false, // a loading or error overlay is up (setMapState)
   modeListeners: new Set(),
 };
-
-const MODES = ["3d", "2d", "table"];
 
 function hasWebGL() {
   try {
