@@ -133,6 +133,9 @@ class ApiTest(unittest.TestCase):
         graph = self.client.get("/api/graph?min_channels=1&limit=100").get_json()
         self.assertEqual(graph["shown_nodes"], 3)
         self.assertEqual(graph["shown_edges"], 2)
+        by_alias = {node["alias"]: node for node in graph["nodes"]}
+        self.assertEqual(by_alias["Bravo"]["network"], "tor")
+        self.assertIn("med_out_ppm", by_alias["Alpha"])
         bare = self.client.get("/api/graph").get_json()
         self.assertLessEqual(bare["limit"], 400)
         self.assertLessEqual(bare["shown_nodes"], 400)
