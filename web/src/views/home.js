@@ -6,6 +6,7 @@ import { DENSITY_STEPS, map } from "../map/map.js";
 import { getStatus, onStatus, statusLine } from "../ui/chrome.js";
 import { mountGraphFilters } from "../ui/graph-filters.js";
 import { mountNodeInspector } from "../ui/inspector.js";
+import { mountMapTable } from "../ui/map-table.js";
 
 const MOBILE = "(max-width: 720px)";
 
@@ -24,8 +25,12 @@ export function mapChrome(el, { inspector = false } = {}) {
   const zoom = document.createElement("div");
   zoom.className = "zoom glass";
   zoom.innerHTML = `
-    <button type="button" class="btn icon mode3d" data-z="mode" aria-pressed="false" aria-label="3D view">3D</button>
-    <hr class="hr" />
+    <div class="modes" role="group" aria-label="Map view">
+      <button type="button" class="btn icon mode" data-mode="3d" aria-pressed="false" aria-label="3D view" title="3D: orbit the network on any axis">3D</button>
+      <button type="button" class="btn icon mode" data-mode="2d" aria-pressed="false" aria-label="2D view" title="Flat 2D map">2D</button>
+      <button type="button" class="btn icon mode" data-mode="table" aria-pressed="false" aria-label="Table view" title="Table of the nodes on the map">${icon("list")}</button>
+    </div>
+    <hr class="hr cam" />
     <button type="button" class="btn icon" data-z="in" aria-label="Zoom in">${icon("plus")}</button>
     <button type="button" class="btn icon" data-z="out" aria-label="Zoom out">${icon("minus")}</button>
     <hr class="hr" />
@@ -40,26 +45,32 @@ export function mapChrome(el, { inspector = false } = {}) {
     if (which === "rotl") map.rotateLeft();
     if (which === "rotr") map.rotateRight();
     if (which === "fit") map.fit();
-    if (which === "mode") {
-      const next = map.mode() === "3d" ? "2d" : "3d";
-      syncMode(next);
+    const next = event.target.closest("[data-mode]")?.dataset.mode;
+    if (next && next !== map.mode()) {
       map.setMode(next).catch((error) => {
         console.warn("3D map unavailable", error);
         map.setMode("2d");
-        syncMode("2d");
       });
+      syncMode(next);
     }
   });
-  const modeBtn = zoom.querySelector('[data-z="mode"]');
   const rotHint = (on3d) => (on3d ? "Drag to orbit on any axis · right-drag to pan" : "Shift+drag or right-drag to rotate");
+  let cleanupTable = null;
   function syncMode(mode) {
-    const on3d = mode === "3d";
-    modeBtn.setAttribute("aria-pressed", String(on3d));
-    modeBtn.title = on3d ? "Back to the 2D map" : "3D view: orbit the network on any axis";
-    zoom.querySelectorAll('[data-z="rotl"], [data-z="rotr"]').forEach((b) => (b.title = rotHint(on3d)));
+    zoom.querySelectorAll("[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
+    zoom.querySelectorAll('[data-z="rotl"], [data-z="rotr"]').forEach((b) => (b.title = rotHint(mode === "3d")));
+    // Camera buttons do nothing useful over the table.
+    zoom.querySelectorAll("[data-z], .hr").forEach((b) => (b.hidden = mode === "table"));
+    zoom.querySelector('[data-mode="3d"]').hidden = !map.supports3d() && mode !== "3d";
+    if (mode === "table" && !cleanupTable) cleanupTable = mountMapTable(el);
+    if (mode !== "table" && cleanupTable) {
+      cleanupTable();
+      cleanupTable = null;
+    }
+    document.body.dataset.tableview = mode === "table" ? "1" : "";
   }
   syncMode(map.mode());
-  modeBtn.hidden = !map.supports3d();
+  const offMode = map.onMode(syncMode);
   el.appendChild(zoom);
   document.body.dataset.inspector = inspector ? "1" : "";
 
@@ -78,7 +89,7 @@ export function mapChrome(el, { inspector = false } = {}) {
     <label class="density lbl" for="density"><span>Hub density</span><span class="mono" data-density-label></span></label>
     <input id="density" class="range" type="range" min="0" max="${DENSITY_STEPS.length - 1}" step="1" value="${step}" style="--p:${(step / (DENSITY_STEPS.length - 1)) * 100}%" aria-valuetext="${DENSITY_STEPS[step]} hubs" />
     <div class="map-cutoff sub"></div>
-    <div class="legend"><span class="sz"><i style="width:4px;height:4px"></i><i style="width:7px;height:7px"></i><i style="width:11px;height:11px"></i></span>Size = capacity<span style="margin-left:auto">Lines = channels</span></div>
+    <div class="legend"><span class="sz"><i style="width:4px;height:4px"></i><i style="width:7px;height:7px"></i><i style="width:11px;height:11px"></i></span>Size = capacity<span style="margin-left:auto" title="Line width grows with the largest channel between two nodes">Width = channel size</span></div>
     <div class="foot"><span>Data: LDK rapid gossip sync · mempool.space</span><a href="https://github.com/bolt-observer/ln-explorer" target="_blank" rel="noopener">Source</a><span>No cookies</span></div>`;
   const cleanupFilters = mountGraphFilters(card);
   const range = card.querySelector("#density");
@@ -128,6 +139,9 @@ export function mapChrome(el, { inspector = false } = {}) {
   return () => {
     offStatus();
     offLoad();
+    offMode();
+    cleanupTable?.();
+    document.body.dataset.tableview = "";
     cleanupFilters();
     document.body.dataset.inspector = "";
   };
