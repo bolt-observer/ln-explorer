@@ -23,6 +23,7 @@ const EDGE_HOVER = premul(232, 238, 235, 0.85);
 export const DENSITY_STEPS = [100, 200, 400, 600, 800];
 
 const MODE_KEY = "bolt.map.mode"; // must precede `s`: readMode() runs in its initialiser
+const MODES = ["3d", "2d", "table"]; // likewise
 
 const s = {
   container: null,
@@ -53,14 +54,40 @@ const s = {
   container3d: null,
   loading3d: null,
   stateShown: false, // a loading or error overlay is up (setMapState)
+  modeListeners: new Set(),
+  stateListeners: new Set(),
 };
+
+function hasWebGL() {
+  try {
+    const canvas = document.createElement("canvas");
+    return Boolean(canvas.getContext("webgl2") || canvas.getContext("webgl"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A saved choice wins. New visitors get 3D, except without WebGL, or on a phone
+ * (coarse pointer on a narrow screen, or a low-memory touch device), where the
+ * flat map is easier on the battery and does not fight page gestures.
+ */
+function defaultMode() {
+  if (!hasWebGL()) return "2d";
+  const coarse = window.matchMedia("(pointer: coarse)").matches;
+  const narrow = window.matchMedia("(max-width: 720px)").matches;
+  const lowMemory = Number(navigator.deviceMemory) > 0 && Number(navigator.deviceMemory) <= 2;
+  return coarse && (narrow || lowMemory) ? "2d" : "3d";
+}
 
 function readMode() {
   try {
-    return localStorage.getItem(MODE_KEY) === "3d" ? "3d" : "2d";
+    const saved = localStorage.getItem(MODE_KEY);
+    if (MODES.includes(saved)) return saved;
   } catch {
-    return "2d";
+    // storage unavailable: fall through to the default
   }
+  return defaultMode();
 }
 const is3d = () => s.mode === "3d" && s.view3d !== null;
 
@@ -283,6 +310,7 @@ function viewportOf(node) {
 // ---------- state rendering ----------
 function setMapState(html) {
   s.stateShown = Boolean(html);
+  s.stateListeners.forEach((fn) => fn(s.stateShown));
   s.container.style.visibility = html || is3d() ? "hidden" : "";
   if (s.container3d) s.container3d.style.visibility = html || !is3d() ? "hidden" : "";
   let el = s.layer.querySelector(".map-state");
@@ -463,6 +491,7 @@ async function ensure3d() {
   s.view3d = lib.create(s.container3d, {
     nodeStyle: (node) => nodeReducer(node, s.graph.getNodeAttributes(node)),
     edgeStyle: (edge) => edgeReducer(edge, s.graph.getEdgeAttributes(edge)).color,
+    edgeCapacity: (edge) => s.graph.getEdgeAttribute(edge, "capacity"),
     onHover: (node) => {
       s.hover = node;
       if (node) showTipForNode(node);
@@ -495,14 +524,19 @@ function applyMode() {
   s.view3d?.setActive(on && mapVisible());
   hideTip();
   document.body.dataset.map3d = on ? "1" : "";
+  document.body.dataset.mapmode = s.mode;
+  s.modeListeners.forEach((fn) => fn(s.mode));
 }
 
-async function setMode(mode) {
-  s.mode = mode === "3d" ? "3d" : "2d";
-  try {
-    localStorage.setItem(MODE_KEY, s.mode);
-  } catch {
-    // private mode: the choice just isn't remembered
+/** Switch view. An explicit choice is saved; the automatic default (persist: false) is not. */
+async function setMode(mode, { persist = true } = {}) {
+  s.mode = MODES.includes(mode) ? mode : "2d";
+  if (persist) {
+    try {
+      localStorage.setItem(MODE_KEY, s.mode);
+    } catch {
+      // private mode: the choice just isn't remembered
+    }
   }
   if (s.mode === "3d") {
     const view = await ensure3d();
@@ -678,11 +712,13 @@ export const map = {
     s.tip.hidden = true;
     document.body.appendChild(s.tip);
     if (s.mode === "3d") {
-      setMode("3d").catch((error) => {
+      setMode("3d", { persist: false }).catch((error) => {
         console.warn("3D map unavailable, using 2D", error);
         s.mode = "2d";
         applyMode();
       });
+    } else {
+      applyMode();
     }
   },
 
@@ -795,7 +831,20 @@ export const map = {
     if (is3d()) return s.view3d.zoomOut();
     s.renderer?.getCamera().animatedUnzoom({ duration: 250 });
   },
-  /** "2d" or "3d" (remembered in localStorage). */
+  /** Fires with true while a loading, error or no-match overlay replaces the map. */
+  onState(fn) {
+    s.stateListeners.add(fn);
+    return () => s.stateListeners.delete(fn);
+  },
+  stateShown() {
+    return s.stateShown;
+  },
+  /** Fires with the new mode after every switch (including a 3D failure falling back to 2D). */
+  onMode(fn) {
+    s.modeListeners.add(fn);
+    return () => s.modeListeners.delete(fn);
+  },
+  /** "3d", "2d" or "table" (remembered in localStorage once chosen). */
   mode() {
     return s.mode;
   },

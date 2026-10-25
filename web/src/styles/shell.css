@@ -102,8 +102,32 @@ body[data-mode="page"] .topbar { position: absolute; }
 .zoom .btn:hover { background: var(--fill-2); color: var(--text); }
 .zoom .hr { margin: 2px 6px; }
 .map.rotating, .map.rotating * { cursor: grabbing !important; }
-.zoom .mode3d { font: 600 11px/1 var(--mono, ui-monospace, monospace); letter-spacing: 0.02em; }
-.zoom .mode3d[aria-pressed="true"] { color: var(--accent); background: var(--fill-2); }
+.zoom .modes { display: flex; flex-direction: column; }
+.zoom .mode { font: 600 11px/1 var(--mono, ui-monospace, monospace); letter-spacing: 0.02em; }
+.zoom .mode[aria-pressed="true"] { color: var(--accent); background: var(--fill-2); }
+.zoom [hidden] { display: none; }
+
+/* Table view: the map's nodes as a table between the network card and the controls. */
+body[data-tableview="1"] .map { opacity: 0.22; transition: opacity 0.3s var(--ease); }
+.maptable { position: absolute; top: calc(16px + var(--topbar-h) + 14px); bottom: var(--gutter); left: calc(var(--gutter) * 2 + 300px); right: calc(var(--gutter) * 2 + 40px); display: flex; flex-direction: column; border-radius: var(--r-lg); overflow: hidden; animation: rise 0.3s var(--ease); }
+body[data-inspector="1"] .maptable { right: calc(var(--gutter) * 3 + var(--inspector-w) + 40px); }
+.maptable[hidden] { display: none; }
+.maptable .mt-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.maptable .mt-head b { font-weight: 600; }
+.maptable .mt-sub { font-size: 11.5px; margin-top: 2px; }
+.maptable .mt-head .btn svg { width: 14px; height: 14px; }
+.maptable .mt-body { flex: 1; overflow: auto; overscroll-behavior: contain; }
+.maptable .mt-empty { padding: 32px; text-align: center; }
+@media (max-width: 1040px) {
+  /* Too narrow for card + table + inspector side by side: the table covers the card. */
+  body[data-inspector="1"] .maptable { left: var(--gutter); }
+}
+@media (max-width: 720px) {
+  /* Stack above the network card (its height is tracked in --mapcard-h) so its toggle stays reachable. */
+  .maptable { top: 76px; left: var(--gutter); right: calc(var(--gutter) + 52px); bottom: calc(var(--gutter) * 2 + var(--mapcard-h, 120px)); }
+  body[data-inspector="1"] .maptable { display: none; }
+  .maptable .capcell .bar { display: none; }
+}
 .map3d { overflow: hidden; }
 .map3d-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
 .map3d-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
@@ -146,3 +170,11 @@ body[data-inspector="1"] .zoom { right: calc(var(--gutter) * 2 + var(--inspector
 .center-card { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(440px, calc(100vw - 32px)); border-radius: var(--r-xl); padding: 28px; display: grid; gap: 12px; text-align: center; justify-items: center; animation: rise 0.3s var(--ease); }
 .center-card h1 { font-size: 20px; font-weight: 600; }
 .center-card p { color: var(--text-2); }
+/* Compact columns: the table shares the screen with the card and often the inspector. */
+.maptable .dtable th, .maptable .dtable td { padding: 0 8px; }
+.maptable .nl-table th:first-child, .maptable .nl-table td:first-child { padding-left: 16px; }
+.maptable .nl-table th:last-child, .maptable .nl-table td:last-child { padding-right: 16px; }
+.maptable .dtable .name { max-width: 190px; }
+.maptable .nl-table .capcell { min-width: 0; }
+.maptable .capcell .bar { width: 52px; }
+body[data-inspector="1"] .maptable .capcell .bar { display: none; }

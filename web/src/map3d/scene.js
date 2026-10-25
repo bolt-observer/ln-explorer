@@ -1,17 +1,14 @@
 // 3D network map: a lazily loaded alternative renderer for the map (see map.js).
-// One InstancedMesh draws every node and one LineSegments draws every channel, so
+// One InstancedMesh draws every node and one instanced ribbon mesh draws every
+// channel (width by capacity, see edges.js), so
 // the ~600 node / ~12k edge hub graph costs two draw calls. TrackballControls give
 // free rotation on all axes; rendering runs only while something moves.
 import {
   AmbientLight,
-  BufferAttribute,
-  BufferGeometry,
   Color,
   DirectionalLight,
   DynamicDrawUsage,
   InstancedMesh,
-  LineBasicMaterial,
-  LineSegments,
   Matrix4,
   MeshLambertMaterial,
   PerspectiveCamera,
@@ -24,6 +21,7 @@ import {
   WebGLRenderer,
 } from "three";
 import { TrackballControls } from "three/examples/jsm/controls/TrackballControls.js";
+import { channelWidth, createEdges } from "./edges.js";
 import { forceCenter, forceLink, forceManyBody, forceSimulation } from "d3-force-3d";
 
 const BG = [9, 12, 11]; // map background behind translucent node colours
@@ -187,14 +185,10 @@ export function create(container, hooks) {
     st.mesh = mesh;
     scene.add(mesh);
 
-    const geo = new BufferGeometry();
-    geo.setAttribute("position", new BufferAttribute(new Float32Array(st.links.length * 6), 3).setUsage(DynamicDrawUsage));
-    // RGBA vertex colours (itemSize 4) so selected and dimmed channels differ in opacity.
-    geo.setAttribute("color", new BufferAttribute(new Float32Array(st.links.length * 8), 4));
-    const lines = new LineSegments(geo, new LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false }));
-    lines.frustumCulled = false;
-    st.lines = lines;
-    scene.add(lines);
+    // RGBA per channel so selected and dimmed channels differ in opacity.
+    st.lines = createEdges(st.links.length);
+    st.links.forEach((l) => (l.width = channelWidth(hooks.edgeCapacity?.(l.key))));
+    scene.add(st.lines.mesh);
 
     // Hub graphs are dense (~20 channels per node), so links pull gently
     // (d3's default 1/min-degree strength, scaled down) and charge spreads them.
@@ -227,7 +221,11 @@ export function create(container, hooks) {
   function disposeGraph() {
     st.sim?.stop();
     st.sim = null;
-    for (const obj of [st.mesh, st.lines]) {
+    if (st.lines) {
+      scene.remove(st.lines.mesh);
+      st.lines.dispose();
+    }
+    for (const obj of [st.mesh]) {
       if (!obj) continue;
       scene.remove(obj);
       obj.geometry.dispose();
@@ -254,13 +252,8 @@ export function create(container, hooks) {
     });
     st.mesh.instanceMatrix.needsUpdate = true;
     st.mesh.computeBoundingSphere();
-    const pos = st.lines.geometry.attributes.position.array;
-    st.links.forEach((l, i) => {
-      const a = st.nodes[l.source];
-      const b = st.nodes[l.target];
-      pos.set([a.x, a.y, a.z, b.x, b.y, b.z], i * 6);
-    });
-    st.lines.geometry.attributes.position.needsUpdate = true;
+    st.links.forEach((l, i) => st.lines.setSegment(i, st.nodes[l.source], st.nodes[l.target]));
+    st.lines.commitPositions();
     st.dirty = true;
   }
 
@@ -273,13 +266,16 @@ export function create(container, hooks) {
     });
     st.styles.forEach((style, i) => st.mesh.setColorAt(i, solid(style.color)));
     if (st.mesh.instanceColor) st.mesh.instanceColor.needsUpdate = true;
-    const col = st.lines.geometry.attributes.color.array;
     st.links.forEach((l, i) => {
-      const c = lineRgba(hooks.edgeStyle(l.key));
-      col.set(c, i * 8);
-      col.set(c, i * 8 + 4);
+      const color = hooks.edgeStyle(l.key);
+      // Opaque hex colours are the highlighted (selected / lit) channels: a touch bolder.
+      // Other channels keep roughly constant ink per channel (opacity / sqrt(width))
+      // so the thick hub-to-hub core does not wash out to a solid blob.
+      const rgba = lineRgba(color);
+      if (color.startsWith("#")) st.lines.setStyle(i, rgba, l.width + 0.8);
+      else st.lines.setStyle(i, [rgba[0], rgba[1], rgba[2], rgba[3] / Math.sqrt(Math.max(1, l.width))], l.width);
     });
-    st.lines.geometry.attributes.color.needsUpdate = true;
+    st.lines.commitStyles();
     writePositions();
     kick();
   }
@@ -524,6 +520,10 @@ export function create(container, hooks) {
       st.dirty = false;
       st.idle = 0;
       const t0 = performance.now();
+      if (st.lines) {
+        const pr = renderer.getPixelRatio();
+        st.lines.setView(st.width * pr, st.height * pr, camera.near, pr);
+      }
       renderer.render(scene, camera);
       drawLabels();
       st.renderMs = st.renderMs * 0.9 + (performance.now() - t0) * 0.1;

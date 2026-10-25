@@ -482,6 +482,17 @@ def _history_note(until: int | None, stale: bool) -> str:
 
 
 
+def _network_class(info: dict) -> str | None:
+    """"clearnet", "tor", "hybrid" (both) or None (no announced address)."""
+    clearnet = bool(info.get("ipv4") or info.get("ipv6"))
+    tor = bool(info.get("tor"))
+    if clearnet and tor:
+        return "hybrid"
+    if tor:
+        return "tor"
+    return "clearnet" if clearnet else None
+
+
 def _protocols(addresses: list[str]) -> tuple[bool, bool, bool]:
     ipv4 = ipv6 = tor = False
     for address in addresses:
@@ -3002,6 +3013,9 @@ class Store:
                     "capacity": info["total_capacity"],
                     "size": round(size, 2),
                     "betweenness_rank": (self.metrics.get(pubkey) or {}).get("betweenness_rank"),
+                    # For the map's table view: same address classes as the network filter.
+                    "network": _network_class(info),
+                    "med_out_ppm": info.get("med_out_ppm"),
                 }
             )
         seen = {}
