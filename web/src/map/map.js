@@ -55,6 +55,7 @@ const s = {
   loading3d: null,
   stateShown: false, // a loading or error overlay is up (setMapState)
   modeListeners: new Set(),
+  stateListeners: new Set(),
 };
 
 function hasWebGL() {
@@ -309,6 +310,7 @@ function viewportOf(node) {
 // ---------- state rendering ----------
 function setMapState(html) {
   s.stateShown = Boolean(html);
+  s.stateListeners.forEach((fn) => fn(s.stateShown));
   s.container.style.visibility = html || is3d() ? "hidden" : "";
   if (s.container3d) s.container3d.style.visibility = html || !is3d() ? "hidden" : "";
   let el = s.layer.querySelector(".map-state");
@@ -828,6 +830,14 @@ export const map = {
   zoomOut() {
     if (is3d()) return s.view3d.zoomOut();
     s.renderer?.getCamera().animatedUnzoom({ duration: 250 });
+  },
+  /** Fires with true while a loading, error or no-match overlay replaces the map. */
+  onState(fn) {
+    s.stateListeners.add(fn);
+    return () => s.stateListeners.delete(fn);
+  },
+  stateShown() {
+    return s.stateShown;
   },
   /** Fires with the new mode after every switch (including a 3D failure falling back to 2D). */
   onMode(fn) {

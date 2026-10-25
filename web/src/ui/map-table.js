@@ -146,10 +146,16 @@ export function mountMapTable(host) {
   panel.addEventListener("pointerleave", () => map.preview(null));
   body.addEventListener("scroll", () => (view.scroll = body.scrollTop), { passive: true });
 
+  // While the map shows a loading, error (with retry) or no-match overlay, step
+  // aside so it is visible, rather than showing stale rows or a stuck spinner.
+  const syncState = (shown) => (panel.hidden = shown);
+  syncState(map.stateShown());
   paint();
   const offLoad = map.onLoad(paint);
+  const offState = map.onState(syncState);
   return () => {
     offLoad();
+    offState();
     map.preview(null);
     panel.remove();
   };
