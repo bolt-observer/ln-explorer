@@ -92,6 +92,9 @@ export function mapChrome(el, { inspector = false } = {}) {
     <div class="legend"><span class="sz"><i style="width:4px;height:4px"></i><i style="width:7px;height:7px"></i><i style="width:11px;height:11px"></i></span>Size = capacity<span style="margin-left:auto" title="Line width grows with the largest channel between two nodes">Width = channel size</span></div>
     <div class="foot"><span>Data: LDK rapid gossip sync · mempool.space</span><a href="https://github.com/bolt-observer/ln-explorer" target="_blank" rel="noopener">Source</a><span>No cookies</span></div>`;
   const cleanupFilters = mountGraphFilters(card);
+  // The phone table view stacks above the card: publish its height.
+  const cardSize = new ResizeObserver(() => document.body.style.setProperty("--mapcard-h", `${Math.round(card.offsetHeight)}px`));
+  cardSize.observe(card);
   const range = card.querySelector("#density");
   const updateDensity = () => {
     const hubs = DENSITY_STEPS[Number(range.value)];
@@ -140,6 +143,7 @@ export function mapChrome(el, { inspector = false } = {}) {
     offStatus();
     offLoad();
     offMode();
+    cardSize.disconnect();
     cleanupTable?.();
     document.body.dataset.tableview = "";
     cleanupFilters();

@@ -22,7 +22,9 @@ attribute vec3 aEnd;
 attribute vec4 aColor;
 attribute float aWidth; // CSS px
 varying vec4 vColor;
-varying float vAcross; // device px from the centre line
+// Device px from the centre line, times clip w, and clip w: dividing in the fragment
+// shader undoes perspective-correct interpolation, since the distance is screen-linear.
+varying vec2 vAcrossW;
 varying float vHalf;   // half the visible width, device px
 void main() {
   vec4 va = modelViewMatrix * vec4(aStart, 1.0);
@@ -40,19 +42,20 @@ void main() {
   float w = max(aWidth * uPixelRatio, 1.0);
   vHalf = w * 0.5;
   float outer = vHalf + 0.75; // room for the antialiased edge
-  vAcross = position.y * outer;
+  float across = position.y * outer;
   vec4 p = mix(a, b, position.x);
-  p.xy += normal * vAcross * 2.0 / uResolution * p.w;
+  p.xy += normal * across * 2.0 / uResolution * p.w;
+  vAcrossW = vec2(across * p.w, p.w);
   gl_Position = p;
   vColor = vec4(aColor.rgb, aColor.a * min(1.0, aWidth * uPixelRatio));
 }`;
 
 const fragmentShader = /* glsl */ `
 varying vec4 vColor;
-varying float vAcross;
+varying vec2 vAcrossW;
 varying float vHalf;
 void main() {
-  float edge = clamp(vHalf + 0.5 - abs(vAcross), 0.0, 1.0);
+  float edge = clamp(vHalf + 0.5 - abs(vAcrossW.x / vAcrossW.y), 0.0, 1.0);
   gl_FragColor = vec4(vColor.rgb, vColor.a * edge);
 }`;
 

@@ -123,7 +123,8 @@ body[data-inspector="1"] .maptable { right: calc(var(--gutter) * 3 + var(--inspe
   body[data-inspector="1"] .maptable { left: var(--gutter); }
 }
 @media (max-width: 720px) {
-  .maptable { top: 76px; left: var(--gutter); right: calc(var(--gutter) + 52px); bottom: calc(var(--gutter) + 64px); }
+  /* Stack above the network card (its height is tracked in --mapcard-h) so its toggle stays reachable. */
+  .maptable { top: 76px; left: var(--gutter); right: calc(var(--gutter) + 52px); bottom: calc(var(--gutter) * 2 + var(--mapcard-h, 120px)); }
   body[data-inspector="1"] .maptable { display: none; }
   .maptable .capcell .bar { display: none; }
 }
