@@ -45,7 +45,7 @@ export function mapChrome(el, { inspector = false } = {}) {
     if (which === "rotl") map.rotateLeft();
     if (which === "rotr") map.rotateRight();
     if (which === "fit") map.fit();
-    const next = event.target.closest("[data-mode]")?.dataset.mode;
+    const next = event.target.closest("button[data-mode]")?.dataset.mode;
     if (next && next !== map.mode()) {
       map.setMode(next).catch((error) => {
         console.warn("3D map unavailable", error);

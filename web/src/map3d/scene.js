@@ -269,7 +269,11 @@ export function create(container, hooks) {
     st.links.forEach((l, i) => {
       const color = hooks.edgeStyle(l.key);
       // Opaque hex colours are the highlighted (selected / lit) channels: a touch bolder.
-      st.lines.setStyle(i, lineRgba(color), color.startsWith("#") ? l.width + 0.8 : l.width);
+      // Other channels keep roughly constant ink per channel (opacity / sqrt(width))
+      // so the thick hub-to-hub core does not wash out to a solid blob.
+      const rgba = lineRgba(color);
+      if (color.startsWith("#")) st.lines.setStyle(i, rgba, l.width + 0.8);
+      else st.lines.setStyle(i, [rgba[0], rgba[1], rgba[2], rgba[3] / Math.sqrt(Math.max(1, l.width))], l.width);
     });
     st.lines.commitStyles();
     writePositions();
