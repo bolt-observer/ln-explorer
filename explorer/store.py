@@ -458,12 +458,21 @@ def _downsample(points: list[dict], max_points: int) -> list[dict]:
     return kept
 
 
+def _coverage(row: dict) -> float | None:
+    count = row.get("channel_count") or 0
+    known = row.get("capacity_known_channels")
+    if not count or known is None:
+        return None
+    return round(known / count, 4)
+
+
 def _history_note(until: int | None, stale: bool) -> str:
     ours = (
-        "The dashed line is this explorer's own gossip snapshot, taken every refresh. "
-        "It counts only nodes and channels in the public rapid gossip sync snapshot "
-        "(capacity only where known), so its lower level is a methodology difference, "
-        "not a network event."
+        "After the marker the line continues with this explorer's own gossip snapshot, "
+        "taken every refresh. It counts only nodes and channels in the public rapid "
+        "gossip sync snapshot, with each channel's capacity read from its funding "
+        "output on-chain; mempool.space also counted unannounced and channel-less "
+        "nodes, so a step at the switch is a methodology difference, not a network event."
     )
     if until is None:
         return "No mempool.space history is available yet. " + ours
@@ -2387,6 +2396,8 @@ class Store:
             "med_base_fee": row.get("med_base_fee"),
             "usd_price": usd,
             "capacity_usd": capacity_usd,
+            # Share of channels whose capacity the snapshot knew (local rows only).
+            "capacity_coverage": _coverage(row) if source == "local" else None,
         }
 
     def _usd_for_day(self, ts: int) -> float | None:
