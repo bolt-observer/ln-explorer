@@ -434,3 +434,43 @@ class GraphFiltersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlausibleSnippetTest(unittest.TestCase):
+    def render(self, **overrides):
+        import dataclasses
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        settings = dataclasses.replace(
+            Settings(
+                data_dir=tmp.name,
+                mempool_api="",
+                disable_refresh=True,
+                web_dir=str(Path(__file__).resolve().parents[2] / "web"),
+                refresh_seconds=0,
+            ),
+            **overrides,
+        )
+        store = Store(str(Path(tmp.name) / "explorer.sqlite"))
+        store.open()
+        client = create_app(settings, store=store, start_background=False).test_client()
+        return client.get("/").get_data(as_text=True)
+
+    def test_off_by_default(self):
+        html = self.render()
+        self.assertNotIn("plausible", html.lower().replace("<!--plausible-->", ""))
+
+    def test_per_site_script_needs_no_domain(self):
+        src = "https://analytics.example.org/js/pa-ZAEnhs3fPiuWt2fJQS5S9.js"
+        html = self.render(plausible_src=src)
+        self.assertIn(f'<script async src="{src}"></script>', html)
+        self.assertIn("plausible.init()", html)
+        self.assertNotIn("data-domain", html)
+
+    def test_legacy_script_uses_domain(self):
+        html = self.render(plausible_domain="explorer.example.com")
+        self.assertIn('data-domain="explorer.example.com"', html)
+
+    def test_unsafe_src_is_ignored(self):
+        html = self.render(plausible_src='https://x/js/pa-a.js"><script>', plausible_domain="a.com")
+        self.assertNotIn("<script>", html.split("</head>")[0].split('app.css" />')[1])
