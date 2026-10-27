@@ -133,9 +133,27 @@ class StoreFundingTest(unittest.TestCase):
         self.path = str(Path(self.tmp.name) / "explorer.sqlite")
         self.store = Store(self.path)
         self.store.open()
+        # A fresh database trusts events from its creation on; these tests use
+        # synthetic timestamps far before "now".
+        self.store._conn.execute("UPDATE meta SET value = '0' WHERE key = 'topology_complete_since'")
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_legacy_database_boundary_is_its_oldest_kept_event(self):
+        conn = self.store._conn
+        conn.execute("DELETE FROM meta WHERE key = 'topology_complete_since'")
+        conn.execute("INSERT INTO events (ts, kind, scid) VALUES (500, 'channel_open', 1), (900, 'channel_close', 2)")
+        conn.commit()
+        self.store._migrate()
+        row = conn.execute("SELECT value FROM meta WHERE key = 'topology_complete_since'").fetchone()
+        self.assertEqual(row[0], "500")
+
+    def test_resolver_keeps_live_channels_first(self):
+        old_closed = scid_of(800_000, 1)
+        client = FakeEsplora({800_000: block(5, {1: [7]}), 970_000: block(10, {3: [1, 5]})})
+        result = resolve_pass(client, [AB, old_closed], budget=2, known_hashes={})
+        self.assertEqual(result.resolved, {AB: 5})
 
     def test_capacity_is_cached_permanently_and_reapplied(self):
         self.store.install_graph(graph(1000, [AB, AC]), "rgs", "")

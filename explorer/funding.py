@@ -67,11 +67,13 @@ def resolve_pass(
     called for every newly learned hash so the caller can cache it.
     """
     result = PassResult()
+    # Pages in first-seen order: the caller's priority (live channels before
+    # closed ones) decides what a limited budget reaches first.
     by_page: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for scid in sorted(set(scids)):
+    for scid in dict.fromkeys(scids):
         height, tx_index, _out = split_scid(scid)
         by_page[(height, tx_index // PAGE * PAGE)].append(scid)
-    pages = sorted(by_page)
+    pages = list(by_page)
     done = 0
     for height, start in pages:
         members = by_page[(height, start)]

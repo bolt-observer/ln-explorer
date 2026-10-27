@@ -458,6 +458,12 @@ def _downsample(points: list[dict], max_points: int) -> list[dict]:
     return kept
 
 
+def _incomplete(snapshot: dict) -> bool:
+    """A snapshot that did not know every channel's capacity."""
+    count = int(snapshot.get("channel_count") or 0)
+    return count > 0 and int(snapshot.get("capacity_known_channels") or 0) < count
+
+
 def _coverage(row: dict) -> float | None:
     count = row.get("channel_count") or 0
     known = row.get("capacity_known_channels")
@@ -768,6 +774,17 @@ class Store:
             );
             """
         )
+        if self._conn.execute("SELECT 1 FROM meta WHERE key = 'topology_complete_since'").fetchone() is None:
+            # Databases from before this boundary was tracked may already have
+            # pruned events: trust only what is still there.
+            oldest = self._conn.execute(
+                "SELECT MIN(ts) FROM events WHERE kind IN ('channel_open', 'channel_reappeared', 'channel_close')"
+            ).fetchone()[0]
+            self._conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('topology_complete_since', ?)",
+                (str(int(oldest if oldest is not None else time.time())),),
+            )
+            self._conn.commit()
         self._conn.executescript(feehistory.SCHEMA)
         feehistory.load_datasets(self._conn)
         snapshot_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(snapshots)")}
@@ -2058,7 +2075,7 @@ class Store:
             return now - checked >= wait
 
         with self._lock:
-            live = [scid for scid, channel in self.channels.items() if not channel.capacity and due(scid)]
+            live = sorted(scid for scid, channel in self.channels.items() if not channel.capacity and due(scid))
             closed: list[int] = []
             if self._conn is not None and self.local_snapshots:
                 since = int(self.local_snapshots[0]["ts"])
@@ -2070,6 +2087,7 @@ class Store:
                     )
                     if int(row[0]) not in self.channels and due(int(row[0]))
                 ]
+                closed.sort()
         return live + closed
 
     def block_hashes(self) -> dict[int, str]:
@@ -2119,20 +2137,20 @@ class Store:
         """Re-total capacity on earlier local snapshots now that more is known.
 
         Each snapshot's channel set is rebuilt from the current graph by undoing
-        the open/close events recorded after it. A snapshot is only rewritten
-        when that rebuild reproduces its recorded channel count (within 0.2%)
-        and it would know more channels' capacity than it did.
+        the open/close events recorded after it, so only snapshots taken while
+        that event log is complete qualify (``topology_complete_since``). A
+        snapshot is rewritten only when the rebuild reproduces its recorded
+        channel count (within 0.2%), knows more channels' capacity, and does
+        not lower its total. The rebuild runs outside the store lock.
         """
         assert self._conn is not None
         with self._lock:
-            # Only snapshots taken while every open/close since was recorded.
-            row = self._conn.execute("SELECT value FROM meta WHERE key = 'topology_complete_since'").fetchone()
-            pruned = int(row[0]) if row and row[0] else 0
             if self.events_since is None:
                 return 0
-            boundary = max(int(self.events_since), pruned)
-            snaps = [snap for snap in self.local_snapshots if snap["ts"] >= boundary]
-            if not snaps:
+            row = self._conn.execute("SELECT value FROM meta WHERE key = 'topology_complete_since'").fetchone()
+            boundary = max(int(self.events_since), int(row[0]) if row and row[0] else 0)
+            snaps = [dict(snap) for snap in self.local_snapshots if snap["ts"] >= boundary]
+            if not any(_incomplete(snap) for snap in snaps):
                 return 0
             events = list(
                 self._conn.execute(
@@ -2141,69 +2159,67 @@ class Store:
                     (int(snaps[0]["ts"]),),
                 )
             )
-            # Capacities a close event or closure lookup already knew.
-            known_closed: dict[int, int] = {}
-            for scid, value in self._conn.execute(
-                "SELECT scid, capacity FROM channel_closures WHERE capacity > 0"
-            ):
-                known_closed[int(scid)] = int(value)
-            for _ts, kind, scid, value in events:
-                if kind == "channel_close" and value:
-                    known_closed.setdefault(int(scid), int(value))
+            known_closed = {
+                int(scid): int(value)
+                for scid, value in self._conn.execute("SELECT scid, capacity FROM channel_closures WHERE capacity > 0")
+            }
+            current = {scid: int(channel.capacity or 0) for scid, channel in self.channels.items()}
+            funding = dict(self.funding)
+        for _ts, kind, scid, value in events:
+            if kind == "channel_close" and value:
+                known_closed.setdefault(int(scid), int(value))
 
-            def capacity(scid: int) -> int:
-                channel = self.channels.get(scid)
-                return int(
-                    (channel.capacity if channel else 0)
-                    or self.funding.get(scid)
-                    or known_closed.get(scid)
-                    or 0
-                )
+        def capacity(scid: int) -> int:
+            return current.get(scid) or funding.get(scid) or known_closed.get(scid) or 0
 
-            members = set(self.channels)
-            pointer = 0
-            updates = []
-            for snap in reversed(snaps):
-                while pointer < len(events) and events[pointer][0] > snap["ts"]:
-                    _ts, kind, scid, _value = events[pointer]
-                    if kind == "channel_close":
-                        members.add(int(scid))
-                    else:
-                        members.discard(int(scid))
-                    pointer += 1
-                count = len(members)
-                recorded = int(snap.get("channel_count") or 0)
-                if abs(count - recorded) > max(3, 0.002 * max(count, recorded)):
-                    continue
-                caps = [value for value in (capacity(scid) for scid in members) if value]
-                total = sum(caps)
-                # Only ever add knowledge: more channels known and no lower total.
-                if len(caps) <= int(snap.get("capacity_known_channels") or 0):
-                    continue
-                if total < int(snap.get("total_capacity") or 0):
-                    continue
-                updates.append(
-                    {
-                        "ts": snap["ts"],
-                        "total_capacity": total,
-                        "gossip_capacity": total,
-                        "capacity_known_channels": len(caps),
-                        "avg_channel_capacity": _mean([float(v) for v in caps]),
-                        "med_channel_capacity": _median([float(v) for v in caps]),
-                    }
-                )
-            if updates:
-                self._conn.executemany(
-                    "UPDATE snapshots SET total_capacity = :total_capacity, gossip_capacity = :gossip_capacity, "
-                    "capacity_known_channels = :capacity_known_channels, avg_channel_capacity = :avg_channel_capacity, "
-                    "med_channel_capacity = :med_channel_capacity WHERE ts = :ts",
-                    updates,
-                )
-                self._conn.commit()
-                self.local_snapshots = [
-                    dict(row) for row in self._conn.execute("SELECT * FROM snapshots ORDER BY ts ASC")
-                ]
-            return len(updates)
+        members = set(current)
+        pointer = 0
+        updates = []
+        for snap in reversed(snaps):
+            while pointer < len(events) and events[pointer][0] > snap["ts"]:
+                _ts, kind, scid, _value = events[pointer]
+                if kind == "channel_close":
+                    members.add(int(scid))
+                else:
+                    members.discard(int(scid))
+                pointer += 1
+            if not _incomplete(snap):
+                continue
+            count = len(members)
+            recorded = int(snap.get("channel_count") or 0)
+            if abs(count - recorded) > max(3, 0.002 * max(count, recorded)):
+                continue
+            caps = [value for value in (capacity(scid) for scid in members) if value]
+            total = sum(caps)
+            # Only ever add knowledge: more channels known and no lower total.
+            if len(caps) <= int(snap.get("capacity_known_channels") or 0):
+                continue
+            if total < int(snap.get("total_capacity") or 0):
+                continue
+            updates.append(
+                {
+                    "ts": snap["ts"],
+                    "total_capacity": total,
+                    "gossip_capacity": total,
+                    "capacity_known_channels": len(caps),
+                    "avg_channel_capacity": _mean([float(v) for v in caps]),
+                    "med_channel_capacity": _median([float(v) for v in caps]),
+                }
+            )
+        if not updates:
+            return 0
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE snapshots SET total_capacity = :total_capacity, gossip_capacity = :gossip_capacity, "
+                "capacity_known_channels = :capacity_known_channels, avg_channel_capacity = :avg_channel_capacity, "
+                "med_channel_capacity = :med_channel_capacity WHERE ts = :ts",
+                updates,
+            )
+            self._conn.commit()
+            self.local_snapshots = [
+                dict(row) for row in self._conn.execute("SELECT * FROM snapshots ORDER BY ts ASC")
+            ]
+        return len(updates)
 
     def capacity_coverage(self) -> float:
         if not self.channels:
