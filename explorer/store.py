@@ -1427,13 +1427,24 @@ class Store:
         """Drop old events, keep the daily aggregate for charts."""
         assert self._conn is not None
         conn = self._conn
-        conn.execute("DELETE FROM events WHERE ts < ?", (now - EVENT_RETENTION_SECONDS,))
+        topology = "kind IN ('channel_open', 'channel_reappeared', 'channel_close')"
+        cut = now - EVENT_RETENTION_SECONDS
+        if conn.execute(f"SELECT 1 FROM events WHERE ts < ? AND {topology} LIMIT 1", (cut,)).fetchone():
+            self._raise_topology_boundary(cut)
+        conn.execute("DELETE FROM events WHERE ts < ?", (cut,))
         conn.execute(
             "DELETE FROM events WHERE kind = 'policy_fee' AND ts < ?",
             (now - POLICY_FEE_RETENTION_SECONDS,),
         )
         total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         if total > EVENT_HARD_CAP:
+            last_dropped = conn.execute(
+                f"SELECT MAX(ts) FROM events WHERE {topology} AND id <= "
+                "(SELECT MIN(id) FROM (SELECT id FROM events ORDER BY id DESC LIMIT ?))",
+                (EVENT_HARD_CAP,),
+            ).fetchone()[0]
+            if last_dropped is not None:
+                self._raise_topology_boundary(int(last_dropped) + 1)
             conn.execute(
                 "DELETE FROM events WHERE id <= "
                 "(SELECT MIN(id) FROM (SELECT id FROM events ORDER BY id DESC LIMIT ?))",
@@ -1442,6 +1453,16 @@ class Store:
         conn.execute(
             "DELETE FROM event_daily WHERE day < ?", (now - EVENT_DAILY_RETENTION_SECONDS,)
         )
+
+    def _raise_topology_boundary(self, ts: int) -> None:
+        """Topology events before `ts` are gone: snapshots older than that cannot be rebuilt."""
+        assert self._conn is not None
+        row = self._conn.execute("SELECT value FROM meta WHERE key = 'topology_complete_since'").fetchone()
+        current = int(row[0]) if row and row[0] else 0
+        if ts > current:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('topology_complete_since', ?)", (str(int(ts)),)
+            )
 
     def query_events(
         self,
@@ -2104,27 +2125,47 @@ class Store:
         """
         assert self._conn is not None
         with self._lock:
-            snaps = list(self.local_snapshots)
+            # Only snapshots taken while every open/close since was recorded.
+            row = self._conn.execute("SELECT value FROM meta WHERE key = 'topology_complete_since'").fetchone()
+            pruned = int(row[0]) if row and row[0] else 0
+            if self.events_since is None:
+                return 0
+            boundary = max(int(self.events_since), pruned)
+            snaps = [snap for snap in self.local_snapshots if snap["ts"] >= boundary]
             if not snaps:
                 return 0
             events = list(
                 self._conn.execute(
-                    "SELECT ts, kind, scid FROM events WHERE kind IN ('channel_open', 'channel_reappeared', 'channel_close') "
+                    "SELECT ts, kind, scid, capacity FROM events WHERE kind IN ('channel_open', 'channel_reappeared', 'channel_close') "
                     "AND ts >= ? AND scid IS NOT NULL ORDER BY ts DESC",
                     (int(snaps[0]["ts"]),),
                 )
             )
+            # Capacities a close event or closure lookup already knew.
+            known_closed: dict[int, int] = {}
+            for scid, value in self._conn.execute(
+                "SELECT scid, capacity FROM channel_closures WHERE capacity > 0"
+            ):
+                known_closed[int(scid)] = int(value)
+            for _ts, kind, scid, value in events:
+                if kind == "channel_close" and value:
+                    known_closed.setdefault(int(scid), int(value))
 
             def capacity(scid: int) -> int:
                 channel = self.channels.get(scid)
-                return int((channel.capacity if channel else 0) or self.funding.get(scid) or 0)
+                return int(
+                    (channel.capacity if channel else 0)
+                    or self.funding.get(scid)
+                    or known_closed.get(scid)
+                    or 0
+                )
 
             members = set(self.channels)
             pointer = 0
             updates = []
             for snap in reversed(snaps):
                 while pointer < len(events) and events[pointer][0] > snap["ts"]:
-                    _ts, kind, scid = events[pointer]
+                    _ts, kind, scid, _value = events[pointer]
                     if kind == "channel_close":
                         members.add(int(scid))
                     else:
@@ -2135,9 +2176,12 @@ class Store:
                 if abs(count - recorded) > max(3, 0.002 * max(count, recorded)):
                     continue
                 caps = [value for value in (capacity(scid) for scid in members) if value]
+                total = sum(caps)
+                # Only ever add knowledge: more channels known and no lower total.
                 if len(caps) <= int(snap.get("capacity_known_channels") or 0):
                     continue
-                total = sum(caps)
+                if total < int(snap.get("total_capacity") or 0):
+                    continue
                 updates.append(
                     {
                         "ts": snap["ts"],

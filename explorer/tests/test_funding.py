@@ -164,9 +164,15 @@ class StoreFundingTest(unittest.TestCase):
         self.assertEqual(self.store.funding_pending(now=10_000 + 7 * 3600), [AC])
         self.assertEqual(sorted(self.store.funding_pending(now=10_000 + 8 * 86400)), sorted([AB, AC]))
 
-    def test_backfill_rebuilds_earlier_snapshots(self):
+    def start_history(self, scids):
+        """Two installs: the second starts the event log (events_since)."""
+        with mock.patch("explorer.store.time.time", return_value=990_000):
+            self.store.install_graph(graph(990_000, scids), "rgs", "")
         with mock.patch("explorer.store.time.time", return_value=1_000_000):
-            self.store.install_graph(graph(1_000_000, [AB, AC]), "rgs", "")
+            self.store.install_graph(graph(1_000_000, scids), "rgs", "")
+
+    def test_backfill_rebuilds_earlier_snapshots(self):
+        self.start_history([AB, AC])
         with mock.patch("explorer.store.time.time", return_value=1_000_010):
             self.store.record_local_snapshot()
         with mock.patch("explorer.store.time.time", return_value=1_010_000):
@@ -185,8 +191,7 @@ class StoreFundingTest(unittest.TestCase):
         self.assertEqual(self.store.backfill_snapshot_capacity(), 0)
 
     def test_backfill_skips_snapshots_it_cannot_reproduce(self):
-        with mock.patch("explorer.store.time.time", return_value=1_000_000):
-            self.store.install_graph(graph(1_000_000, [AB, AC]), "rgs", "")
+        self.start_history([AB, AC])
         with mock.patch("explorer.store.time.time", return_value=1_000_010):
             self.store.record_local_snapshot()
         # Pretend the recorded count disagrees with what the events rebuild.
@@ -194,6 +199,49 @@ class StoreFundingTest(unittest.TestCase):
         self.store.local_snapshots[0]["channel_count"] = 40
         self.store.record_funding({AB: 5_000_000, AC: 2_000_000}, [], [])
         self.assertEqual(self.store.backfill_snapshot_capacity(), 0)
+
+    def test_backfill_never_lowers_a_total_and_uses_known_close_capacity(self):
+        self.start_history([AB, AC])
+        self.store.channels[AB].capacity = 100_000_000  # learned earlier (e.g. mempool)
+        with mock.patch("explorer.store.time.time", return_value=1_000_010):
+            self.store.record_local_snapshot()
+        self.assertEqual(self.store.local_snapshots[-1]["total_capacity"], 100_000_000)
+        with mock.patch("explorer.store.time.time", return_value=1_010_000):
+            self.store.install_graph(graph(1_010_000, [AC, BC]), "rgs", "")  # AB closes
+        # AB's lookup fails; AC resolves. Without AB's capacity the rebuilt total would drop.
+        self.store.record_funding({AC: 1_000_000}, [], [AB])
+        self.store._conn.execute("UPDATE events SET capacity = NULL WHERE scid = ?", (AB,))
+        self.store._conn.execute("UPDATE channel_closures SET capacity = NULL WHERE scid = ?", (AB,))
+        self.assertEqual(self.store.backfill_snapshot_capacity(), 0)
+        self.assertEqual(self.store.local_snapshots[0]["total_capacity"], 100_000_000)
+        # With the capacity the close event recorded, the snapshot gains AC.
+        self.store._conn.execute("UPDATE events SET capacity = 100000000 WHERE scid = ? AND kind = 'channel_close'", (AB,))
+        self.assertEqual(self.store.backfill_snapshot_capacity(), 1)
+        self.assertEqual(self.store.local_snapshots[0]["total_capacity"], 101_000_000)
+
+    def test_backfill_skips_snapshots_older_than_complete_history(self):
+        self.start_history([AB, AC])
+        with mock.patch("explorer.store.time.time", return_value=1_000_010):
+            self.store.record_local_snapshot()
+        self.store._raise_topology_boundary(1_000_011)  # events before this were pruned
+        self.store.record_funding({AB: 5_000_000, AC: 2_000_000}, [], [])
+        self.assertEqual(self.store.backfill_snapshot_capacity(), 0)
+
+
+class TransportFailureTest(unittest.TestCase):
+    def test_timeouts_are_transient_and_keep_earlier_results(self):
+        client = FakeEsplora({970_000: block(10, {3: [1, 5]}), 970_100: block(40, {30: [9]})})
+        real = client.block_txs
+
+        def flaky(block_hash, start):
+            if int(block_hash, 16) == 970_100:
+                raise TimeoutError("read timed out")
+            return real(block_hash, start)
+
+        client.block_txs = flaky
+        result = resolve_pass(client, [AB, BC], 100, {})
+        self.assertEqual(result.resolved, {AB: 5})
+        self.assertEqual(result.errors, [BC])
 
 
 if __name__ == "__main__":

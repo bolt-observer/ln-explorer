@@ -88,11 +88,12 @@ def resolve_pass(
                     on_hash(height, block_hash)
             result.requests += 1
             txs = client.block_txs(block_hash, start)
-        except SourceError as exc:
-            if exc.status == 429:
+        except Exception as exc:  # noqa: BLE001 - any failure of one page is local to it
+            status = getattr(exc, "status", None) if isinstance(exc, SourceError) else None
+            if status == 429:
                 result.rate_limited = True
                 break
-            if exc.status in (400, 404):
+            if status in (400, 404):
                 # Height past the tip, or a page past the block's last transaction.
                 result.invalid.extend(members)
             else:

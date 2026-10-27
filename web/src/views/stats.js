@@ -161,7 +161,9 @@ function historyChart(points, { metric, cap, width, height }) {
 
   const fees = metric === "fees";
   const mempool = fees ? [] : points.filter((p) => p.source !== "local");
-  const local = fees ? [] : points.filter((p) => p.source === "local");
+  // One line, one source at a time: our snapshots take over after mempool's last point.
+  const handoff = mempool.length ? mempool[mempool.length - 1].ts : -Infinity;
+  const local = fees ? [] : points.filter((p) => p.source === "local" && p.ts > handoff);
   const path = (seg) => seg.map((p, i) => `${i ? "L" : "M"}${f(X(p.ts))},${f(Y(p.v))}`).join("");
   const series = [];
   const feeGroups = [];
@@ -247,7 +249,8 @@ function historyChart(points, { metric, cap, width, height }) {
     ${grid.join("")}${xTicks}${series.join("")}
     <g class="st-hover" visibility="hidden"><line class="st-cross" x1="0" x2="0" y1="${pad.t}" y2="${f(y0)}"/><circle class="st-hdot" r="4.5"/></g>
   </svg>`;
-  return { svg, pts: points.map((p) => ({ ...p, x: X(p.ts), y: Y(p.v) })) };
+  const drawn = fees ? points : [...mempool, ...local];
+  return { svg, pts: drawn.map((p) => ({ ...p, x: X(p.ts), y: Y(p.v) })) };
 }
 
 /** 90-day diverging bars: opens up, closes down. */
