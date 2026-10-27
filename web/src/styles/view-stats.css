@@ -20,6 +20,9 @@
 .st-dot { fill: var(--accent); }
 .st-local { fill: none; stroke: var(--text-2); stroke-width: 1.5; stroke-dasharray: 3 4; stroke-linecap: round; }
 .st-ring { fill: var(--bg); stroke: var(--text); stroke-width: 1.5; }
+/* Where mempool.space's series ends and this explorer's snapshots take over. */
+.st-switch { stroke: var(--text-2); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.55; }
+.st-bridge { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 1 4; stroke-linecap: round; opacity: 0.8; }
 .st-cross { stroke: rgba(232, 238, 235, 0.25); shape-rendering: crispEdges; }
 .st-hdot { fill: var(--accent); stroke: var(--bg); stroke-width: 2; }
 .st-hdot.local { fill: var(--text); }
@@ -34,6 +37,7 @@
 .st-key { display: inline-flex; align-items: center; gap: 6px; }
 .st-sw { display: inline-block; width: 16px; border-top: 2px solid var(--accent); }
 .st-sw.dash { border-top: 1.5px dashed var(--text-2); }
+.st-sw.switch { width: 0; height: 12px; border-top: 0; border-left: 1px dashed var(--text-2); margin: 0 4px -2px; }
 .st-sw.fs-a { border-top-color: #8fb4ff; }
 .st-sw.fs-b { border-top-color: var(--warn); }
 .st-sw.band { border-top: 8px solid var(--fill-3); width: 12px; }

@@ -201,7 +201,8 @@ class HistoryMergeTest(unittest.TestCase):
         stamps = [(point["ts"], point["source"]) for point in payload["points"]]
         self.assertEqual(
             stamps,
-            [(100, "mempool"), (150, "local"), (200, "mempool"), (300, "mempool"),
+            # Local rows inside mempool's span are left out: one source per date.
+            [(100, "mempool"), (200, "mempool"), (300, "mempool"),
              (350, "local"), (400, "local")],
         )
         self.assertEqual(payload["external_until"], 300)

@@ -36,6 +36,11 @@ class Settings:
     metrics_samples: int = 64
     close_lookups_per_refresh: int = 150
     rank_history_top: int = 200
+    # Funding-output capacity resolver (explorer/funding.py).
+    funding_rps: float = 2.0
+    funding_requests_per_pass: int = 600
+    funding_idle_seconds: int = 900
+    funding_start_delay: float = 20.0
     lnd_rest_url: str = ""
     lnd_macaroon_hex: str = ""
     lnd_macaroon_path: str = ""
@@ -84,6 +89,10 @@ class Settings:
             metrics_samples=_int("METRICS_SAMPLES", 64),
             close_lookups_per_refresh=_int("CLOSE_LOOKUPS_PER_REFRESH", 150),
             rank_history_top=_int("RANK_HISTORY_TOP", 200),
+            funding_rps=float(os.environ.get("FUNDING_RPS", "2") or "2"),
+            funding_requests_per_pass=_int("FUNDING_REQUESTS_PER_PASS", 600),
+            funding_idle_seconds=_int("FUNDING_IDLE_SECONDS", 900),
+            funding_start_delay=float(os.environ.get("FUNDING_START_DELAY", "20") or "20"),
             lnd_rest_url=os.environ.get("LND_REST_URL", "").strip(),
             lnd_macaroon_hex=os.environ.get("LND_MACAROON_HEX", "").strip(),
             lnd_macaroon_path=os.environ.get("LND_MACAROON_PATH", "").strip(),

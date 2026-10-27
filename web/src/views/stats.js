@@ -9,6 +9,11 @@ import { openSheet } from "../ui/sheet.js";
 
 // mempool.space's backends have gaps of weeks; lines never bridge more than this.
 const HISTORY_GAP = 10 * 86400;
+// Our snapshots count capacity only for channels whose funding output is known;
+// below this share a point would dip for lack of data, not a network change.
+const MIN_LOCAL_COVERAGE = 0.97;
+// Show the coverage caveat only while it matters.
+const FULL_COVERAGE = 0.99;
 // Fee history sources from /api/fees/history, oldest first; `cls` picks the stroke colour.
 const FEE_SOURCES = {
   lnresearch: { cls: "fs-a", short: "lnresearch archive" },
@@ -156,7 +161,9 @@ function historyChart(points, { metric, cap, width, height }) {
 
   const fees = metric === "fees";
   const mempool = fees ? [] : points.filter((p) => p.source !== "local");
-  const local = fees ? [] : points.filter((p) => p.source === "local");
+  // One line, one source at a time: our snapshots take over after mempool's last point.
+  const handoff = mempool.length ? mempool[mempool.length - 1].ts : -Infinity;
+  const local = fees ? [] : points.filter((p) => p.source === "local" && p.ts > handoff);
   const path = (seg) => seg.map((p, i) => `${i ? "L" : "M"}${f(X(p.ts))},${f(Y(p.v))}`).join("");
   const series = [];
   const feeGroups = [];
@@ -192,8 +199,26 @@ function historyChart(points, { metric, cap, width, height }) {
         `<path class="st-line" d="${line}"/>`
     );
   }
+  // Our own snapshots continue the same line after mempool's series ends. The
+  // gap between the two is bridged by a thin dotted segment, and a subtle
+  // marker shows where the source switches.
+  if (mempool.length && local.length && local[0].ts > mempool[mempool.length - 1].ts) {
+    const a = mempool[mempool.length - 1];
+    const b = local[0];
+    const xs = f(X(b.ts));
+    series.push(
+      `<line class="st-switch" x1="${xs}" x2="${xs}" y1="${pad.t}" y2="${f(y0)}"/>` +
+        `<path class="st-bridge" d="M${f(X(a.ts))},${f(Y(a.v))}L${xs},${f(Y(b.v))}"/>`
+    );
+  }
   for (const seg of splitGaps(local)) {
-    if (seg.length > 1) series.push(`<path class="st-local" d="${path(seg)}"/>`);
+    if (seg.length > 1) {
+      const line = path(seg);
+      series.push(
+        `<path d="${line}L${f(X(seg[seg.length - 1].ts))},${f(y0)}L${f(X(seg[0].ts))},${f(y0)}Z" fill="url(#${id})"/>` +
+          `<path class="st-line" d="${line}"/>`
+      );
+    }
     const end = seg[seg.length - 1];
     series.push(`<circle class="st-ring" cx="${f(X(end.ts))}" cy="${f(Y(end.v))}" r="4"/>`);
   }
@@ -224,7 +249,8 @@ function historyChart(points, { metric, cap, width, height }) {
     ${grid.join("")}${xTicks}${series.join("")}
     <g class="st-hover" visibility="hidden"><line class="st-cross" x1="0" x2="0" y1="${pad.t}" y2="${f(y0)}"/><circle class="st-hdot" r="4.5"/></g>
   </svg>`;
-  return { svg, pts: points.map((p) => ({ ...p, x: X(p.ts), y: Y(p.v) })) };
+  const drawn = fees ? points : [...mempool, ...local];
+  return { svg, pts: drawn.map((p) => ({ ...p, x: X(p.ts), y: Y(p.v) })) };
 }
 
 /** 90-day diverging bars: opens up, closes down. */
@@ -486,15 +512,18 @@ export async function mount(ctx) {
       return;
     }
     const until = history.external_until;
+    const since = history.points.find((p) => p.source === "local")?.ts ?? history.local_since;
     const latest = stats?.network_latest || {};
-    const localLabel = state.metric === "capacity" ? "this explorer, known capacity" : "this explorer's snapshots";
+    const cov = stats?.capacity_coverage ?? 1;
     legendHost.innerHTML = `
-      <span class="st-key"><i class="st-sw"></i>mempool.space</span>
-      <span class="st-key"><i class="st-sw dash"></i>${localLabel}</span>
-      <span class="st-legend-r">${until ? `mempool data ${history.external_stale ? "stops" : "through"} ${shortDay(until)}` : "Sources"}
+      <span class="st-key"><i class="st-sw"></i>${until ? `mempool.space to ${shortDay(until)}` : "mempool.space"}</span>
+      <span class="st-key"><i class="st-sw"></i>${since ? `this explorer from ${shortDay(since)}` : "this explorer"}</span>
+      ${until && since ? `<span class="st-key"><i class="st-sw switch"></i>source switch</span>` : ""}
+      <span class="st-legend-r">Sources
         <details class="info right"><summary aria-label="About the data sources">${icon("info")}</summary><div>
+          <p>Up to ${until ? isoDay(until) : "the switch"} the line shows mempool.space's network statistics, which stopped updating then. From ${since ? isoDay(since) : "the marker"} it continues with this explorer's own snapshot of the public gossip graph (LDK rapid gossip sync), taken every refresh; a dotted segment bridges the weeks with no data.</p>
+          <p>Capacity is the sum of each public channel's funding output, read on-chain by short channel id${cov < FULL_COVERAGE ? ` (currently known for ${num(cov * 100, 1)}% of channels)` : ""}. The methodologies differ: mempool.space also counted unannounced and channel-less nodes (${int(latest.node_count)} nodes, ${int(latest.channel_count)} channels on its last day, against ${int(stats?.gossip_nodes)} nodes and ${int(stats?.gossip_channels)} channels in the gossip graph now), so a step at the switch is not a network event.</p>
           ${history.notes ? `<p>${esc(history.notes)}</p>` : ""}
-          <p>Solid lines are mempool.space statistics${until ? `, which stop on ${isoDay(until)}` : ""}. Dashed lines continue with this explorer's own rapid-gossip-sync snapshots (about ${int(stats?.gossip_nodes)} nodes / ${int(stats?.gossip_channels)} channels, capacity only partially known), which are not directly comparable with mempool's totals (${int(latest.node_count)} nodes including unannounced and channel-less, ${int(latest.channel_count)} channels).</p>
         </div></details>
       </span>`;
   }
@@ -519,6 +548,8 @@ export async function mount(ctx) {
     const height = chartHeight(chartWidth);
     chartH = height;
     const points = (state.metric === "fees" ? feePoints() : history.points
+      // Local capacity points from before the funding-output lookups caught up undercount.
+      .filter((p) => state.metric !== "capacity" || p.source !== "local" || p.capacity_coverage == null || p.capacity_coverage >= MIN_LOCAL_COVERAGE)
       .map((p) => ({ ts: p.ts, source: p.source === "local" ? "local" : "mempool", v: Number(metricValue(state.metric, state.cap, p)) })))
       .filter((p) => p.v != null && Number.isFinite(p.v) && p.v > 0)
       .sort((a, b) => a.ts - b.ts);
@@ -616,21 +647,25 @@ export async function mount(ctx) {
 
   // ----- KPIs, panels, facts -----
   function renderKpis() {
-    const latest = stats.network_latest || {};
     const rates = history?.currency_rates || {};
-    const capacity = latest.total_capacity || stats.reported?.total_capacity;
-    const capKpi = capacity
-      ? kpi(
-          "Network capacity",
-          `<span title="${int(capacity)} sats">${int(capacity / 1e8)}</span><small>BTC</small>`,
-          `${rates.USD ? `≈ ${usdCompact((capacity / 1e8) * rates.USD)} · ` : ""}mempool.space${latest.ts ? `, as of ${shortDay(latest.ts)}` : ""}`,
-          "lead"
-        )
-      : kpi("Network capacity", `${btcHtml(stats.gossip_capacity)}`, "this explorer, known capacity only", "lead");
+    // Headline numbers come from this explorer's live gossip snapshot.
+    const capacity = stats.gossip_capacity || 0;
+    const cov = stats.capacity_coverage ?? 0;
+    const asOf = stats.graph_timestamp ? `as of ${dateTime(stats.graph_timestamp)}` : "";
+    const capKpi = kpi(
+      "Network capacity",
+      `<span title="${int(capacity)} sats">${int(capacity / 1e8)}</span><small>BTC</small>`,
+      [
+        rates.USD ? `≈ ${usdCompact((capacity / 1e8) * rates.USD)}` : "",
+        `public channels, ${asOf}`,
+        cov < FULL_COVERAGE ? `capacity known for ${num(cov * 100, 1)}% of channels` : "",
+      ].filter(Boolean).join(" · "),
+      "lead"
+    );
     $(".st-kpis").innerHTML = [
       capKpi,
       kpi("Public channels", int(stats.gossip_channels), `${int(stats.disabled_channels)} disabled both ways`),
-      kpi("Announced nodes", int(stats.gossip_nodes), latest.node_count ? `${int(latest.node_count)} incl. unannounced (mempool.space)` : ""),
+      kpi("Announced nodes", int(stats.gossip_nodes), "with at least one public channel"),
       kpi("Median fee rate", `${num(stats.median_fee_rate_ppm, 0)}<small>ppm</small>`, `base ${baseFee(stats.median_base_fee_msat)}`),
       kpi("BTC price", rates.USD ? `$${int(rates.USD)}` : "—", rates.EUR ? `€${int(rates.EUR)}${rates.time ? ` · ${shortDay(rates.time)}` : ""}` : ""),
     ].join("");
@@ -752,7 +787,12 @@ export async function mount(ctx) {
   }
 
   function renderFacts() {
-    $(".st-facts").innerHTML = `Capacity known for ${num((stats.capacity_coverage || 0) * 100, 0)}% of channels · Snapshot ${esc(dateTime(stats.graph_timestamp))} · Data: LDK rapid gossip sync · mempool.space`;
+    const cov = stats.capacity_coverage || 0;
+    $(".st-facts").innerHTML = [
+      `Snapshot ${esc(dateTime(stats.graph_timestamp))}`,
+      cov < FULL_COVERAGE ? `capacity known for ${num(cov * 100, 1)}% of channels` : "",
+      "Data: LDK rapid gossip sync · on-chain funding outputs and pre-switch history from mempool.space",
+    ].filter(Boolean).join(" · ");
   }
 
   const observer = new ResizeObserver((entries) => {
