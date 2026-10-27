@@ -2079,10 +2079,13 @@ class Store:
             closed: list[int] = []
             if self._conn is not None and self.local_snapshots:
                 since = int(self.local_snapshots[0]["ts"])
+                # A capacity the close event or closure lookup recorded is enough.
                 closed = [
                     int(row[0])
                     for row in self._conn.execute(
-                        "SELECT DISTINCT scid FROM events WHERE kind = 'channel_close' AND ts >= ? AND scid IS NOT NULL",
+                        "SELECT DISTINCT e.scid FROM events e LEFT JOIN channel_closures c ON c.scid = e.scid "
+                        "WHERE e.kind = 'channel_close' AND e.ts >= ? AND e.scid IS NOT NULL "
+                        "AND COALESCE(e.capacity, 0) = 0 AND COALESCE(c.capacity, 0) = 0",
                         (since,),
                     )
                     if int(row[0]) not in self.channels and due(int(row[0]))
@@ -2159,6 +2162,12 @@ class Store:
                     (boundary,),  # from the boundary, so replays of earlier changes show
                 )
             )
+            # The graph in memory must be the one the newest events were diffed
+            # against (events are stamped when their graph is installed). After a
+            # restart that lost the last save, it is older: rebuilding from it
+            # would attribute old channels to newer snapshots.
+            if events and events[0][0] > self.updated_at:
+                return 0
             known_closed = {
                 int(scid): int(value)
                 for scid, value in self._conn.execute("SELECT scid, capacity FROM channel_closures WHERE capacity > 0")

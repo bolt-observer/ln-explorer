@@ -256,6 +256,7 @@ class StoreFundingTest(unittest.TestCase):
             "INSERT INTO events (ts, kind, scid) VALUES (?, ?, ?)",
             [(1_006_000, "channel_close", AC), (1_006_000, "channel_open", BC)],
         )
+        self.store.updated_at = 1_006_000.0  # the replaying install
         with mock.patch("explorer.store.time.time", return_value=1_006_010):
             self.store.record_local_snapshot()  # AB + BC, after the replay
         self.store.record_funding({AB: 5_000_000, AC: 2_000_000, BC: 9_000_000}, [], [])
@@ -263,6 +264,28 @@ class StoreFundingTest(unittest.TestCase):
         snaps = {snap["ts"]: snap["total_capacity"] for snap in self.store.local_snapshots}
         self.assertEqual(snaps[1_006_010], 14_000_000)
         self.assertEqual(snaps[1_005_010], 0)  # not rebuilt from a log it cannot trust
+
+    def test_backfill_waits_for_a_graph_matching_the_event_log(self):
+        self.start_history([AB, AC])
+        with mock.patch("explorer.store.time.time", return_value=1_005_000):
+            self.store.install_graph(graph(1_005_000, [AB, BC]), "rgs", "")
+        with mock.patch("explorer.store.time.time", return_value=1_005_010):
+            self.store.record_local_snapshot()
+        self.store.updated_at = 1_000_000.0  # restarted with the graph saved before 1_005_000
+        self.store.record_funding({AB: 5_000_000, AC: 2_000_000, BC: 9_000_000}, [], [])
+        self.assertEqual(self.store.backfill_snapshot_capacity(), 0)
+
+    def test_closed_channels_with_known_capacity_are_not_looked_up(self):
+        self.start_history([AB, AC])
+        with mock.patch("explorer.store.time.time", return_value=1_000_010):
+            self.store.record_local_snapshot()
+        with mock.patch("explorer.store.time.time", return_value=1_010_000):
+            self.store.install_graph(graph(1_010_000, [AB]), "rgs", "")  # AC closes
+        self.store._conn.execute("UPDATE events SET capacity = NULL WHERE scid = ?", (AC,))
+        self.store._conn.execute("UPDATE channel_closures SET capacity = NULL WHERE scid = ?", (AC,))
+        self.assertIn(AC, self.store.funding_pending())
+        self.store._conn.execute("UPDATE channel_closures SET capacity = 2000000 WHERE scid = ?", (AC,))
+        self.assertNotIn(AC, self.store.funding_pending())
 
 
 class TransportFailureTest(unittest.TestCase):
