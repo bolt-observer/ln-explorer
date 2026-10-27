@@ -67,6 +67,7 @@ def resolve_pass(
     called for every newly learned hash so the caller can cache it.
     """
     result = PassResult()
+    budget = max(2, budget)  # a block hash and its page must fit in one pass
     # Pages in first-seen order: the caller's priority (live channels before
     # closed ones) decides what a limited budget reaches first.
     by_page: dict[tuple[int, int], list[int]] = defaultdict(list)

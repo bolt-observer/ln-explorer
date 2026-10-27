@@ -512,7 +512,7 @@ export async function mount(ctx) {
       return;
     }
     const until = history.external_until;
-    const since = history.local_since;
+    const since = history.points.find((p) => p.source === "local")?.ts ?? history.local_since;
     const latest = stats?.network_latest || {};
     const cov = stats?.capacity_coverage ?? 1;
     legendHost.innerHTML = `

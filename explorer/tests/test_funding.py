@@ -245,6 +245,25 @@ class StoreFundingTest(unittest.TestCase):
         self.store.record_funding({AB: 5_000_000, AC: 2_000_000}, [], [])
         self.assertEqual(self.store.backfill_snapshot_capacity(), 0)
 
+    def test_backfill_ignores_snapshots_before_a_replayed_change(self):
+        self.start_history([AB, AC])
+        with mock.patch("explorer.store.time.time", return_value=1_005_000):
+            self.store.install_graph(graph(1_005_000, [AB, BC]), "rgs", "")
+        with mock.patch("explorer.store.time.time", return_value=1_005_010):
+            self.store.record_local_snapshot()  # AB + BC
+        # A restart before save(): the same change is logged again later.
+        self.store._conn.executemany(
+            "INSERT INTO events (ts, kind, scid) VALUES (?, ?, ?)",
+            [(1_006_000, "channel_close", AC), (1_006_000, "channel_open", BC)],
+        )
+        with mock.patch("explorer.store.time.time", return_value=1_006_010):
+            self.store.record_local_snapshot()  # AB + BC, after the replay
+        self.store.record_funding({AB: 5_000_000, AC: 2_000_000, BC: 9_000_000}, [], [])
+        self.assertEqual(self.store.backfill_snapshot_capacity(), 1)
+        snaps = {snap["ts"]: snap["total_capacity"] for snap in self.store.local_snapshots}
+        self.assertEqual(snaps[1_006_010], 14_000_000)
+        self.assertEqual(snaps[1_005_010], 0)  # not rebuilt from a log it cannot trust
+
 
 class TransportFailureTest(unittest.TestCase):
     def test_timeouts_are_transient_and_keep_earlier_results(self):

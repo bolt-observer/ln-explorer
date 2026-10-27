@@ -2168,6 +2168,19 @@ class Store:
         for _ts, kind, scid, value in events:
             if kind == "channel_close" and value:
                 known_closed.setdefault(int(scid), int(value))
+        # A restart between a snapshot and the graph save replays the same
+        # changes later (an open after an open, a close after a close). The log
+        # before such a replay no longer matches the graphs: only rebuild newer
+        # snapshots.
+        last_state: dict[int, str] = {}
+        for ts, kind, scid, _value in reversed(events):  # oldest first
+            state = "closed" if kind == "channel_close" else "open"
+            if last_state.get(int(scid)) == state:
+                snaps = [snap for snap in snaps if snap["ts"] >= ts]
+            last_state[int(scid)] = state
+        if not snaps:
+            return 0
+        events = [event for event in events if event[0] > snaps[0]["ts"]]
 
         def capacity(scid: int) -> int:
             return current.get(scid) or funding.get(scid) or known_closed.get(scid) or 0
@@ -2422,10 +2435,13 @@ class Store:
             for row in self.external_history
             if row["ts"] >= cutoff
         ]
+        # One source per date: our snapshots only continue after mempool's
+        # series (selected before downsampling, so neither evicts the other).
+        handoff = until if until is not None else -1
         points.extend(
             self._history_point(row, "local")
             for row in self.local_snapshots
-            if row["ts"] >= cutoff
+            if row["ts"] >= cutoff and row["ts"] > handoff
         )
         points.sort(key=lambda point: point["ts"])
         points = _downsample(points, max_points)
