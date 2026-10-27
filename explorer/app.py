@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 PUBKEY_RE = re.compile(r"^[0-9a-fA-F]{66}$")
 DOMAIN_RE = re.compile(r"^[a-z0-9.-]+$")
+PLAUSIBLE_PA_RE = re.compile(r"/js/pa-[A-Za-z0-9_-]+\.js$")
 PAGE_ROUTES = {"", "nodes", "stats", "search", "node", "channel", "rankings", "route"}
 PROTOCOLS = frozenset({"ipv4", "ipv6", "tor"})
 
@@ -647,7 +648,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
         domain = settings.plausible_domain
         snippet = ""
         src = settings.plausible_src
-        if domain and DOMAIN_RE.match(domain) and src.startswith("https://") and '"' not in src:
+        safe_src = src.startswith("https://") and not any(c in src for c in '"<> ')
+        if safe_src and PLAUSIBLE_PA_RE.search(src):
+            # Newer per-site Plausible script: the site is baked into the file
+            # name, so no data-domain; it needs the queue stub plus init().
+            snippet = (
+                f'<script async src="{src}"></script>'
+                "<script>window.plausible=window.plausible||function()"
+                "{(plausible.q=plausible.q||[]).push(arguments)},"
+                "plausible.init=plausible.init||function(i){plausible.o=i||{}};"
+                "plausible.init()</script>"
+            )
+        elif domain and DOMAIN_RE.match(domain) and safe_src:
             snippet = (
                 f'<script defer data-domain="{domain}" src="{src}"></script>'
             )
