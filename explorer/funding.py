@@ -36,6 +36,7 @@ PAGE = 25  # esplora's /block/:hash/txs page size
 # index, or a height esplora does not know) is almost certainly permanent but is
 # re-checked weekly in case one backend answered wrongly.
 RETRY_ERROR_SECONDS = 6 * 3600
+BACKFILL_RECHECK_SECONDS = 6 * 3600
 RETRY_INVALID_SECONDS = 7 * 86400
 
 
@@ -148,6 +149,7 @@ def start_funding_resolver(store, settings) -> threading.Thread | None:
         # Backfill old snapshots once the backlog is drained, and again whenever
         # a later pass learned something new.
         need_backfill = True
+        last_backfill = 0.0
         while True:
             pause = settings.funding_idle_seconds
             try:
@@ -164,7 +166,10 @@ def start_funding_resolver(store, settings) -> threading.Thread | None:
                             result.remaining,
                             store.capacity_coverage() * 100,
                         )
-                    need_backfill = need_backfill or bool(result.resolved)
+                    # Capacities also arrive from refresh-time mempool lookups the
+                    # resolver never sees, so re-check snapshots periodically too.
+                    stale = time.monotonic() - last_backfill > BACKFILL_RECHECK_SECONDS
+                    need_backfill = need_backfill or bool(result.resolved) or stale
                     if result.rate_limited:
                         pause = 300
                     elif result.remaining:
@@ -174,6 +179,7 @@ def start_funding_resolver(store, settings) -> threading.Thread | None:
                         if changed:
                             logger.info("Backfilled capacity on %s local snapshots", changed)
                         need_backfill = False
+                        last_backfill = time.monotonic()
                 else:
                     pause = 30
             except Exception:

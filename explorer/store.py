@@ -916,6 +916,15 @@ class Store:
                 for row in self._conn.execute("SELECT key, value FROM meta")
             }
             self.updated_at = float(meta.get("updated_at") or 0)
+            saved_at = meta.get("graph_saved_at")
+            if saved_at and self.local_snapshots:
+                last_snapshot = int(self.local_snapshots[-1]["ts"])
+                if last_snapshot > int(saved_at):
+                    # The process stopped between recording a snapshot and saving
+                    # its graph; the event log may not lead to that snapshot's
+                    # channel set, so nothing up to it can be rebuilt.
+                    self._raise_topology_boundary(last_snapshot + 1)
+                    self._conn.commit()
             self.graph_timestamp = int(meta.get("graph_timestamp") or 0)
             self.source = meta.get("source") or ""
             self.source_detail = meta.get("source_detail") or ""
@@ -2643,6 +2652,8 @@ class Store:
             )
             meta = {
                 "updated_at": str(self.updated_at),
+                # Snapshots up to here describe a graph that is now on disk.
+                "graph_saved_at": str(int(time.time())),
                 "graph_timestamp": str(self.graph_timestamp),
                 "source": self.source,
                 "source_detail": self.source_detail,

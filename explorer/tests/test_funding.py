@@ -275,6 +275,20 @@ class StoreFundingTest(unittest.TestCase):
         self.store.record_funding({AB: 5_000_000, AC: 2_000_000, BC: 9_000_000}, [], [])
         self.assertEqual(self.store.backfill_snapshot_capacity(), 0)
 
+    def test_snapshot_without_its_saved_graph_is_not_rebuilt(self):
+        self.start_history([AB, AC])
+        with mock.patch("explorer.store.time.time", return_value=1_000_100):
+            self.store.save()
+        with mock.patch("explorer.store.time.time", return_value=1_000_200):
+            self.store.record_local_snapshot()  # then the process dies before save()
+        self.store._conn.close()
+        self.store = Store(self.path)
+        self.store.open()
+        row = self.store._conn.execute("SELECT value FROM meta WHERE key = 'topology_complete_since'").fetchone()
+        self.assertEqual(int(row[0]), 1_000_201)
+        self.store.record_funding({AB: 5_000_000, AC: 2_000_000}, [], [])
+        self.assertEqual(self.store.backfill_snapshot_capacity(), 0)
+
     def test_closed_channels_with_known_capacity_are_not_looked_up(self):
         self.start_history([AB, AC])
         with mock.patch("explorer.store.time.time", return_value=1_000_010):
