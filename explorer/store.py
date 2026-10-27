@@ -616,6 +616,10 @@ class Store:
         self._last_address_flip: dict[str, tuple[frozenset, frozenset, float]] = {}
         self._last_field_change: dict[tuple[str, str], tuple[str, str, float]] = {}
         self._rank_day_written: int | None = None
+        # Funding-output capacities (scid -> sats) and failed lookups
+        # (scid -> (status, checked_at)), loaded from funding_outputs.
+        self.funding: dict[int, int] = {}
+        self._funding_failed: dict[int, tuple[str, float]] = {}
         self._conn = None
 
     def open(self) -> None:
@@ -741,6 +745,18 @@ class Store:
                 PRIMARY KEY (day, metric, pubkey)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS rank_history_node ON rank_history (pubkey, metric, day);
+            -- Funding output values by SCID (explorer/funding.py). Permanent:
+            -- an output's value never changes. status: ok | invalid | error.
+            CREATE TABLE IF NOT EXISTS funding_outputs (
+                scid INTEGER PRIMARY KEY,
+                capacity INTEGER,
+                status TEXT NOT NULL,
+                checked_at REAL
+            );
+            CREATE TABLE IF NOT EXISTS block_hashes (
+                height INTEGER PRIMARY KEY,
+                hash TEXT NOT NULL
+            );
             """
         )
         self._conn.executescript(feehistory.SCHEMA)
@@ -836,6 +852,14 @@ class Store:
                     policy1=_policy_load(row, "n1"),
                     policy2=_policy_load(row, "n2"),
                 )
+            for row in self._conn.execute("SELECT scid, capacity, status, checked_at FROM funding_outputs"):
+                if row["status"] == "ok" and row["capacity"]:
+                    self.funding[row["scid"]] = int(row["capacity"])
+                else:
+                    self._funding_failed[row["scid"]] = (row["status"], row["checked_at"] or 0.0)
+            for scid, channel in self.channels.items():
+                if not channel.capacity and scid in self.funding:
+                    channel.capacity = self.funding[scid]
             self.metrics = {}
             for row in self._conn.execute("SELECT * FROM metrics"):
                 self.metrics[row["pubkey"]] = {
@@ -1131,7 +1155,9 @@ class Store:
             # value we already fetched (for example from mempool).
             for scid, channel in channels.items():
                 old = self.channels.get(scid)
-                if channel.capacity is None and old and old.capacity:
+                if channel.capacity is None and scid in self.funding:
+                    channel.capacity = self.funding[scid]
+                elif channel.capacity is None and old and old.capacity:
                     channel.capacity = old.capacity
             self.nodes = nodes
             self.channels = channels
@@ -1978,6 +2004,153 @@ class Store:
             peers[channel.node1].add(channel.node2)
             peers[channel.node2].add(channel.node1)
         return {node: sorted(values) for node, values in peers.items() if values}
+
+    # ---------- funding outputs (explorer/funding.py) ----------
+    def funding_pending(self, now: float | None = None) -> list[int]:
+        """SCIDs whose funding output should be looked up, most useful first.
+
+        Live channels without a capacity come first; then channels that closed
+        since the first local snapshot, whose capacity lets the snapshot
+        backfill reconstruct the capacity of earlier graphs.
+        """
+        from explorer.funding import RETRY_ERROR_SECONDS, RETRY_INVALID_SECONDS
+
+        now = now or time.time()
+
+        def due(scid: int) -> bool:
+            if scid in self.funding:
+                return False
+            failed = self._funding_failed.get(scid)
+            if failed is None:
+                return True
+            status, checked = failed
+            wait = RETRY_INVALID_SECONDS if status == "invalid" else RETRY_ERROR_SECONDS
+            return now - checked >= wait
+
+        with self._lock:
+            live = [scid for scid, channel in self.channels.items() if not channel.capacity and due(scid)]
+            closed: list[int] = []
+            if self._conn is not None and self.local_snapshots:
+                since = int(self.local_snapshots[0]["ts"])
+                closed = [
+                    int(row[0])
+                    for row in self._conn.execute(
+                        "SELECT DISTINCT scid FROM events WHERE kind = 'channel_close' AND ts >= ? AND scid IS NOT NULL",
+                        (since,),
+                    )
+                    if int(row[0]) not in self.channels and due(int(row[0]))
+                ]
+        return live + closed
+
+    def block_hashes(self) -> dict[int, str]:
+        assert self._conn is not None
+        with self._lock:
+            return {int(row[0]): row[1] for row in self._conn.execute("SELECT height, hash FROM block_hashes")}
+
+    def remember_block_hash(self, height: int, block_hash: str) -> None:
+        assert self._conn is not None
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO block_hashes (height, hash) VALUES (?, ?)", (int(height), block_hash)
+            )
+            self._conn.commit()
+
+    def record_funding(self, resolved: dict[int, int], invalid: list[int], errors: list[int], now: float | None = None) -> int:
+        """Persist one resolver pass and apply the capacities. Returns channels updated."""
+        assert self._conn is not None
+        now = now or time.time()
+        with self._lock:
+            rows = [(scid, sats, "ok", now) for scid, sats in resolved.items()]
+            rows += [(scid, None, "invalid", now) for scid in invalid]
+            rows += [(scid, None, "error", now) for scid in errors]
+            if rows:
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO funding_outputs (scid, capacity, status, checked_at) VALUES (?, ?, ?, ?)",
+                    rows,
+                )
+                self._conn.commit()
+            self.funding.update(resolved)
+            for scid in resolved:
+                self._funding_failed.pop(scid, None)
+            for scid in invalid:
+                self._funding_failed[scid] = ("invalid", now)
+            for scid in errors:
+                self._funding_failed[scid] = ("error", now)
+            changed = 0
+            for scid, sats in resolved.items():
+                channel = self.channels.get(scid)
+                if channel is not None and not channel.capacity and self._set_capacity_unlocked(scid, sats, recompute=False):
+                    changed += 1
+            if changed:
+                self._recompute_derived()
+            return changed
+
+    def backfill_snapshot_capacity(self) -> int:
+        """Re-total capacity on earlier local snapshots now that more is known.
+
+        Each snapshot's channel set is rebuilt from the current graph by undoing
+        the open/close events recorded after it. A snapshot is only rewritten
+        when that rebuild reproduces its recorded channel count (within 0.2%)
+        and it would know more channels' capacity than it did.
+        """
+        assert self._conn is not None
+        with self._lock:
+            snaps = list(self.local_snapshots)
+            if not snaps:
+                return 0
+            events = list(
+                self._conn.execute(
+                    "SELECT ts, kind, scid FROM events WHERE kind IN ('channel_open', 'channel_reappeared', 'channel_close') "
+                    "AND ts >= ? AND scid IS NOT NULL ORDER BY ts DESC",
+                    (int(snaps[0]["ts"]),),
+                )
+            )
+
+            def capacity(scid: int) -> int:
+                channel = self.channels.get(scid)
+                return int((channel.capacity if channel else 0) or self.funding.get(scid) or 0)
+
+            members = set(self.channels)
+            pointer = 0
+            updates = []
+            for snap in reversed(snaps):
+                while pointer < len(events) and events[pointer][0] > snap["ts"]:
+                    _ts, kind, scid = events[pointer]
+                    if kind == "channel_close":
+                        members.add(int(scid))
+                    else:
+                        members.discard(int(scid))
+                    pointer += 1
+                count = len(members)
+                recorded = int(snap.get("channel_count") or 0)
+                if abs(count - recorded) > max(3, 0.002 * max(count, recorded)):
+                    continue
+                caps = [value for value in (capacity(scid) for scid in members) if value]
+                if len(caps) <= int(snap.get("capacity_known_channels") or 0):
+                    continue
+                total = sum(caps)
+                updates.append(
+                    {
+                        "ts": snap["ts"],
+                        "total_capacity": total,
+                        "gossip_capacity": total,
+                        "capacity_known_channels": len(caps),
+                        "avg_channel_capacity": _mean([float(v) for v in caps]),
+                        "med_channel_capacity": _median([float(v) for v in caps]),
+                    }
+                )
+            if updates:
+                self._conn.executemany(
+                    "UPDATE snapshots SET total_capacity = :total_capacity, gossip_capacity = :gossip_capacity, "
+                    "capacity_known_channels = :capacity_known_channels, avg_channel_capacity = :avg_channel_capacity, "
+                    "med_channel_capacity = :med_channel_capacity WHERE ts = :ts",
+                    updates,
+                )
+                self._conn.commit()
+                self.local_snapshots = [
+                    dict(row) for row in self._conn.execute("SELECT * FROM snapshots ORDER BY ts ASC")
+                ]
+            return len(updates)
 
     def capacity_coverage(self) -> float:
         if not self.channels:

@@ -198,7 +198,7 @@ class Mempool:
         body, _headers = self._open(path, timeout)
         return body
 
-    def _open(self, path: str, timeout: float) -> tuple[object, dict]:
+    def _open(self, path: str, timeout: float, raw: bool = False) -> tuple[object, dict]:
         if not self.enabled:
             raise SourceError("mempool API is disabled")
         url = f"{self.base_url}{path}"
@@ -217,11 +217,27 @@ class Mempool:
                 time.sleep(delay)
                 delay = min(delay * 2, 20)
                 continue
+            if raw:
+                return payload.decode("utf-8", "replace"), headers
             try:
                 return json.loads(payload.decode("utf-8")), headers
             except json.JSONDecodeError as exc:
                 raise SourceError(f"invalid JSON from {url}") from exc
         raise SourceError(f"HTTP 429 from {url}", status=429)
+
+    # ---- esplora (on-chain) endpoints, used to read channel funding outputs ----
+    def block_hash(self, height: int) -> str:
+        """Hash of the block at `height` (plain-text endpoint)."""
+        text, _headers = self._open(f"/block-height/{int(height)}", timeout=20, raw=True)
+        value = str(text).strip()
+        if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+            raise SourceError(f"unexpected block hash for height {height}")
+        return value
+
+    def block_txs(self, block_hash: str, start: int) -> list:
+        """25 full transactions of a block from `start` (a multiple of 25)."""
+        payload = self._get(f"/block/{block_hash}/txs/{int(start)}", timeout=30)
+        return payload if isinstance(payload, list) else []
 
     def statistics(self, interval: str = "latest"):
         return self._get(f"/v1/lightning/statistics/{interval}", timeout=30)

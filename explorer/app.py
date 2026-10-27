@@ -12,6 +12,7 @@ from flask import Flask, abort, jsonify, request, send_from_directory
 
 from explorer.config import Settings
 from explorer.features import FILTER_NAMES
+from explorer.funding import start_funding_resolver
 from explorer.refresh import enrich_channel, enrich_node, start_refresh
 from explorer.rgs import parse_scid
 from explorer.routing import (
@@ -113,6 +114,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None, sta
         start_background = not settings.disable_refresh
     if start_background:
         start_refresh(store, settings)
+        start_funding_resolver(store, settings)
 
     web_dir = Path(settings.web_dir)
     app = Flask(__name__, static_folder=None)
