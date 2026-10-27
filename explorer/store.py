@@ -2156,7 +2156,7 @@ class Store:
                 self._conn.execute(
                     "SELECT ts, kind, scid, capacity FROM events WHERE kind IN ('channel_open', 'channel_reappeared', 'channel_close') "
                     "AND ts >= ? AND scid IS NOT NULL ORDER BY ts DESC",
-                    (int(snaps[0]["ts"]),),
+                    (boundary,),  # from the boundary, so replays of earlier changes show
                 )
             )
             known_closed = {
