@@ -2,7 +2,7 @@
 
 The standalone Bolt Observer Lightning Network explorer: a public explorer for the Lightning Network with an interactive graph of the network. It brings back the explorer part of the original bolt.observer platform without the rest of the platform. One container, no accounts, no billing, and no Bitcoin or Lightning node required for the default setup.
 
-Live instance: https://bolt-explorer.exe.xyz
+Live instance: https://bolt.observer
 
 The site is a full-screen map of the public network: search (⌘K) or click any hub to inspect it in place, then open node profiles, channel details, the node table, rankings, and network stats as panels over the map. Centrality ranks (betweenness, closeness, eigenvector, and weighted variants) follow the columns the original bolt.observer node explorer exposed.
 
