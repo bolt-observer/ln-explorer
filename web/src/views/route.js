@@ -1,11 +1,11 @@
 // "/route?from=&to=&amount=" — exact public-policy routes, with a local map.
 import Graph from "graphology";
-import Sigma from "sigma";
 import { api, isAbort } from "../lib/api.js";
 import { btcHtml, displayName, esc, int, num } from "../lib/format.js";
 import { icon } from "../lib/icons.js";
 import { go, homeUrl, mapUrl } from "../lib/router.js";
 import { attachAutocomplete } from "../ui/autocomplete.js";
+import { loadSigma } from "../lib/webgl.js";
 
 const DEFAULT_AMOUNT = 100000;
 const PUBKEY_RE = /^[0-9a-f]{66}$/;
@@ -54,7 +54,7 @@ function routeCard(path, index, best) {
 
 // Keep shared nodes together, route 1 in the middle and alternatives on either side.
 // This renderer belongs to this view, never to the persistent Atlas network map.
-function drawRouteGraph(container, paths) {
+function drawRouteGraph(Sigma, container, paths) {
   const source = paths[0].hops[0].from;
   const target = paths[0].hops.at(-1).to;
   const nodes = new Map();
@@ -122,7 +122,7 @@ function drawRouteGraph(container, paths) {
   return renderer;
 }
 
-function renderResults(host, payload, amount) {
+function renderResults(host, payload, amount, Sigma) {
   const timedNote = payload.timed_out
     ? '<p class="notice warn rt-timeout" role="status">The search hit its time budget. These are the best routes found before the cutoff; the results may be incomplete.</p>'
     : "";
@@ -143,7 +143,8 @@ function renderResults(host, payload, amount) {
     ${timedNote}
     ${payload.paths.map((path, index) => routeCard(path, index, payload.paths[0])).join("")}`;
   try {
-    return drawRouteGraph(host.querySelector("#route-sigma"), payload.paths);
+    if (!Sigma) throw new Error("WebGL unavailable");
+    return drawRouteGraph(Sigma, host.querySelector("#route-sigma"), payload.paths);
   } catch (error) {
     console.warn("Route mini-graph failed", error);
     host.querySelector(".rt-graph").innerHTML = '<p class="rt-graph-fallback muted">The route map needs WebGL. The tables below list every hop, with links to every node and channel.</p>';
@@ -207,10 +208,10 @@ export async function mount(ctx) {
   }
   try {
     const query = new URLSearchParams({ from, to, amount_sat: String(amount), k: "5" });
-    const payload = await api(`/api/route?${query}`, { signal: ctx.signal });
+    const [payload, Sigma] = await Promise.all([api(`/api/route?${query}`, { signal: ctx.signal }), loadSigma()]);
     if (ctx.alive() && !disposed) {
       host.setAttribute("aria-busy", "false");
-      renderer = renderResults(host, payload, amount);
+      renderer = renderResults(host, payload, amount, Sigma);
     }
   } catch (error) {
     if (ctx.alive() && !disposed && !isAbort(error)) {

@@ -1,7 +1,6 @@
 // The map: one persistent sigma renderer behind every map-mode view.
 // Views talk to it through the exported `map` object; it never renders views.
 import Graph from "graphology";
-import Sigma from "sigma";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import { api } from "../lib/api.js";
 import { btc, displayName, esc, int } from "../lib/format.js";
@@ -9,6 +8,7 @@ import { go, homeUrl, mapUrl, currentRoute } from "../lib/router.js";
 import { graphQuery, GRAPH_FILTER_KEYS } from "../lib/graph-query.js";
 import { refreshStatus, getStatus } from "../ui/chrome.js";
 import { Fallback } from "./fallback.js";
+import { hasWebGL, loadBundle, loadSigma } from "../lib/webgl.js";
 
 export const ACCENT = "#1dfebb";
 // sigma blends with premultiplied alpha (ONE, ONE_MINUS_SRC_ALPHA), so translucent
@@ -52,20 +52,10 @@ const s = {
   mode: readMode(),
   view3d: null,
   container3d: null,
-  loading3d: null,
   stateShown: false, // a loading or error overlay is up (setMapState)
   modeListeners: new Set(),
   stateListeners: new Set(),
 };
-
-function hasWebGL() {
-  try {
-    const canvas = document.createElement("canvas");
-    return Boolean(canvas.getContext("webgl2") || canvas.getContext("webgl"));
-  } catch {
-    return false;
-  }
-}
 
 /**
  * A saved choice wins. New visitors get 3D, except without WebGL, or on a phone
@@ -462,19 +452,8 @@ function stageClick() {
 
 // ---------- 3D mode ----------
 function load3dBundle() {
-  if (window.__boltMap3d) return Promise.resolve(window.__boltMap3d);
-  s.loading3d ||= new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = "/static/map3d.js";
-    script.async = true;
-    script.onload = () => (window.__boltMap3d ? resolve(window.__boltMap3d) : reject(new Error("3D map failed to load")));
-    script.onerror = () => {
-      s.loading3d = null;
-      reject(new Error("3D map failed to load"));
-    };
-    document.head.appendChild(script);
-  });
-  return s.loading3d;
+  if (!hasWebGL()) return Promise.reject(new Error("3D map needs WebGL"));
+  return loadBundle("map3d", "__boltMap3d");
 }
 
 function mapVisible() {
@@ -555,8 +534,28 @@ async function setMode(mode, { persist = true } = {}) {
 }
 
 // ---------- renderer lifecycle ----------
-function createRenderer() {
-  s.renderer?.kill();
+const NO_WEBGL_NOTE =
+  "The network map needs WebGL, which your browser has disabled or doesn't support. Stats and lists below still work.";
+
+function setWebglNote(text) {
+  let note = s.layer?.querySelector(".map-webgl-note");
+  if (!text) return note?.remove();
+  if (!note && s.layer) {
+    note = document.createElement("p");
+    note.className = "map-webgl-note glass";
+    note.setAttribute("role", "status");
+    s.layer.appendChild(note);
+  }
+  if (note) note.textContent = text;
+}
+
+/** `Sigma` is the lazily loaded class, or null to draw with the canvas fallback. */
+function createRenderer(Sigma) {
+  try {
+    s.renderer?.kill();
+  } catch (error) {
+    console.warn("Closing the previous map renderer failed", error);
+  }
   s.renderer = null;
   s.fallback?.destroy();
   s.fallback = null;
@@ -567,6 +566,7 @@ function createRenderer() {
     return;
   }
   try {
+    if (!Sigma) throw new Error("WebGL unavailable");
     s.renderer = new Sigma(s.graph, s.container, {
       renderLabels: true,
       labelFont: '"IBM Plex Sans", system-ui, sans-serif',
@@ -594,15 +594,35 @@ function createRenderer() {
     wireEvents();
     wireRotation();
     window.__explorerLayout = "sigma";
+    setWebglNote(null);
   } catch (error) {
     console.warn("WebGL map failed, using canvas fallback", error);
-    s.fallback = new Fallback(s.container, s.graph, {
-      nodeReducer,
-      edgeReducer,
-      onNode: (node) => go(homeUrl({ node })),
-      onEdge: (edge) => go(mapUrl(`/channel/${s.graph.getEdgeAttribute(edge, "scid")}`)),
-    });
-    window.__explorerLayout = "canvas";
+    try {
+      s.renderer?.kill();
+    } catch {
+      // a half-built sigma instance; the container is cleared below
+    }
+    s.renderer = null;
+    s.container.replaceChildren();
+    try {
+      s.fallback = new Fallback(s.container, s.graph, {
+        nodeReducer,
+        edgeReducer,
+        onNode: (node) => go(homeUrl({ node })),
+        onEdge: (edge) => go(mapUrl(`/channel/${s.graph.getEdgeAttribute(edge, "scid")}`)),
+      });
+      window.__explorerLayout = "canvas";
+      setWebglNote(
+        hasWebGL()
+          ? "The interactive map could not start, so this is a simplified static view."
+          : "Your browser has WebGL disabled or doesn't support it, so this is a simplified static map without zoom or 3D. Stats and lists still work.",
+      );
+    } catch (fallbackError) {
+      console.warn("Canvas map failed too", fallbackError);
+      s.fallback = null;
+      window.__explorerLayout = "none";
+      setWebglNote(NO_WEBGL_NOTE);
+    }
   }
   window.__explorerLayoutDone = true;
   sync3d();
@@ -677,6 +697,8 @@ async function load(query, signal) {
     if (signal.aborted) throw new DOMException("Map request superseded", "AbortError");
   }
   const payload = await api(`/api/graph?${query}`, { signal });
+  const Sigma = await loadSigma();
+  if (signal.aborted) throw new DOMException("Map request superseded", "AbortError");
   await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
   if (signal.aborted) throw new DOMException("Map request superseded", "AbortError");
   s.payload = payload;
@@ -689,7 +711,7 @@ async function load(query, signal) {
   s.hoverEdge = null;
   hideTip();
   recomputeLit();
-  createRenderer();
+  createRenderer(Sigma);
   const route = currentRoute();
   const resetUrl = mapUrl(route.parts[0] === "channel" ? route.path : "/", {
     node: route.params.get("node"),
@@ -850,7 +872,7 @@ export const map = {
   },
   /** 3D needs WebGL; the canvas fallback renderer means it is unavailable. */
   supports3d() {
-    return !s.fallback;
+    return !s.fallback && hasWebGL();
   },
   setMode,
   /** Reset view: no rotation, whole graph framed in the free area. */
