@@ -139,6 +139,7 @@ body[data-inspector="1"] .zoom { right: calc(var(--gutter) * 2 + var(--inspector
 .map-tip b { font-weight: 600; }
 .map-tip[hidden] { display: none; }
 
+.map-webgl-note { position: absolute; z-index: 3; left: 50%; top: 84px; transform: translateX(-50%); max-width: min(560px, calc(100% - 32px)); margin: 0; padding: 10px 14px; border-radius: 10px; font-size: 13px; line-height: 1.45; color: var(--text); text-align: center; pointer-events: none; }
 .map-state { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 24px; color: var(--muted); }
 .map-state .box { max-width: 420px; display: grid; gap: 10px; justify-items: center; }
 .map-state h1 { font-size: 18px; color: var(--text); font-weight: 600; }

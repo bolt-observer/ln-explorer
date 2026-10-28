@@ -2,7 +2,7 @@
   "name": "bolt-observer-explorer-web",
   "private": true,
   "scripts": {
-    "build": "esbuild src/app.js src/app.css src/map3d.js --bundle --outdir=static --minify --target=es2020,chrome100,safari15,firefox100 --external:/fonts/* --log-level=warning"
+    "build": "esbuild src/app.js src/app.css src/map3d.js src/sigma2d.js --bundle --outdir=static --minify --target=es2020,chrome100,safari15,firefox100 --external:/fonts/* --log-level=warning"
   },
   "dependencies": {
     "d3-force-3d": "^3.0.6",
